@@ -657,6 +657,28 @@ export function apply(ctx, config = {}) {
     return `${(size / 1024 / 1024).toFixed(2)} MB`
   }
 
+  /** Seller and total from a PDF invoice, read locally. No model call, no tokens. */
+  async function invoiceFields(path) {
+    const python = await resolvePython(pythonOverride)
+    if (!python) return null
+    return new Promise((resolve) => {
+      execFile(
+        python,
+        [join(HERE, 'tools', 'invoice_fields.py'), path],
+        { timeout: 30000, windowsHide: true, maxBuffer: 1024 * 1024 },
+        (error, stdout) => {
+          if (error) return resolve(null)
+          try {
+            const line = String(stdout || '').trim().split(/\r?\n/).pop() || ''
+            resolve(JSON.parse(line))
+          } catch {
+            resolve(null)
+          }
+        },
+      )
+    })
+  }
+
   /**
    * Save an inbound document or photo under <journalDir>/attachments and log it
    * as a ledger reference, so an invoice is still findable months later.
@@ -684,16 +706,34 @@ export function apply(ctx, config = {}) {
           path,
           duplicate: !fresh,
         }
+        // An invoice only needs two fields for a reimbursement list, and both can
+        // be read from the PDF text layer locally — no model call, no tokens.
+        if (fresh && /\.pdf$/iu.test(name)) {
+          const invoice = await invoiceFields(path)
+          if (invoice && invoice.ok) {
+            record.invoice = {
+              seller: invoice.seller,
+              amount: invoice.amount,
+              number: invoice.number,
+              date: invoice.date,
+            }
+          } else if (invoice && invoice.error) {
+            record.invoiceError = invoice.error
+          }
+        }
         if (fresh) {
           await appendFile(join(journalDir, 'attachments', 'index.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
           log(`已保存微信附件：${path}`)
         }
         saved.push(record)
         if (fresh) {
+          const detail = record.invoice
+            ? [record.invoice.seller, record.invoice.amount && `¥${record.invoice.amount}`].filter(Boolean).join(' ')
+            : ''
           try {
             await journalCommand(['add', '--type', 'ref',
               '--text', `${ATTACHMENT_KIND_LABEL[ref.kind] || '附件'}：${name}`,
-              '--note', `本地文件 ${path}`, '--src', 'wechat'])
+              '--note', [`本地文件 ${path}`, detail].filter(Boolean).join(' · '), '--src', 'wechat'])
           } catch (error) {
             log(`附件登记账本失败：${error.message}`)
           }
@@ -705,7 +745,11 @@ export function apply(ctx, config = {}) {
     }
     const lines = saved.map((record) => {
       const where = `attachments/${month}/${record.path.split(/[\\/]/u).pop()}`
-      return `${record.duplicate ? '已存在' : '已保存'}${ATTACHMENT_KIND_LABEL[record.kind] || '附件'}：${record.name}（${humanBytes(record.bytes)}）→ ${where}`
+      const fields = record.invoice
+        ? [record.invoice.seller, record.invoice.amount && `¥${record.invoice.amount}`].filter(Boolean).join(' · ')
+        : ''
+      const tail = fields ? ` · ${fields}` : record.invoiceError ? ` · 未识别出发票要素` : ''
+      return `${record.duplicate ? '已存在' : '已保存'}${ATTACHMENT_KIND_LABEL[record.kind] || '附件'}：${record.name}（${humanBytes(record.bytes)}）→ ${where}${tail}`
     })
     for (const line of failed) lines.push(`未能保存${line}`)
     if (!lines.length) return
