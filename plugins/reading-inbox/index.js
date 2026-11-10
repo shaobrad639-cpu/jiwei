@@ -5,7 +5,7 @@
  * tools the agent uses to curate them, and serves the small JSON API that the
  * Web UI panel reads.
  */
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, appendFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
@@ -328,6 +328,9 @@ async function arxivMeta(url) {
 
 const pythonResolvers = new Map()
 let lastMetaError = ''
+let lastBodyError = ''
+// Enough text for a digest to summarise; keeps the store small.
+const BODY_LIMIT = 12000
 
 /** Find a working Python interpreter once, preferring an explicit override. */
 function resolvePython(override = '') {
@@ -390,6 +393,51 @@ async function pythonMeta(url, pythonOverride = '') {
           lastMetaError = `bad json: ${line.slice(0, 120)}`
           resolve(null)
         }
+      },
+    )
+  })
+}
+
+/**
+ * Full article text through the Python helper.
+ *
+ * Metadata alone made the weekly digest guess from headlines; this is the body
+ * it actually needs. WeChat official-account articles are extracted from
+ * #js_content, and a captcha wall is reported instead of stored as empty text.
+ */
+async function pythonArticle(url, pythonOverride = '') {
+  const python = await resolvePython(pythonOverride)
+  if (!python) {
+    lastBodyError = 'no python interpreter'
+    return null
+  }
+  return new Promise((resolve) => {
+    execFile(
+      python,
+      [join(HERE, 'tools', 'fetch_article.py'), url],
+      { timeout: 45000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        const line = String(stdout || '').trim().split(/\r?\n/).pop() || ''
+        let data = null
+        try {
+          data = JSON.parse(line)
+        } catch {
+          data = null
+        }
+        if (!data) {
+          lastBodyError = `${error ? error.message : 'no output'} ${String(stderr || '').slice(0, 200)}`
+          return resolve(null)
+        }
+        if (data.error || !data.body) {
+          lastBodyError = String(data.error || 'empty body').slice(0, 200)
+          return resolve(null)
+        }
+        resolve({
+          title: cleanTitle(data.title || ''),
+          description: cleanTitle(data.description || ''),
+          body: String(data.body),
+          chars: Number(data.chars) || String(data.body).length,
+        })
       },
     )
   })
@@ -549,6 +597,15 @@ export function apply(ctx, config = {}) {
       for (const [id, url] of pending) void enrich(id, url, { retries: 2 })
     })
 
+  // Items captured before body storage existed still deserve a real summary.
+  void store
+    .read((data) => data.items.filter((item) => item.url && !item.body && item.status !== 'dropped').slice(0, 5).map((item) => [item.id, item.url]))
+    .then(async (pending) => {
+      for (const [id, url] of pending) {
+        await ensureBody(id, url)
+      }
+    })
+
   void store
     .read((data) => ({ digests: data.digests.filter((digest) => !digest.files), items: data.items }))
     .then(async ({ digests, items }) => {
@@ -584,7 +641,87 @@ export function apply(ctx, config = {}) {
     })
   }
 
+  const ATTACHMENT_KIND_LABEL = { image: '图片', file: '文件', voice: '语音', video: '视频' }
+  const ATTACHMENT_FALLBACK = { image: 'image.jpg', file: 'file.bin', voice: 'voice.silk', video: 'video.mp4' }
+
+  function safeFileName(name, kind) {
+    const base = String(name || '').replace(/[\\/:*?"<>|\u0000-\u001f]/gu, '_').trim()
+    const chosen = base || ATTACHMENT_FALLBACK[kind] || 'file.bin'
+    return chosen.length > 120 ? chosen.slice(-120) : chosen
+  }
+
+  function humanBytes(size) {
+    if (!size) return '大小未知'
+    if (size < 1024) return `${size} B`
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+    return `${(size / 1024 / 1024).toFixed(2)} MB`
+  }
+
+  /**
+   * Save an inbound document or photo under <journalDir>/attachments and log it
+   * as a ledger reference, so an invoice is still findable months later.
+   */
+  async function saveAttachments(event) {
+    const month = new Date().toISOString().slice(0, 7)
+    const dir = join(journalDir, 'attachments', month)
+    const saved = []
+    const failed = []
+    for (const ref of event.attachmentRefs || []) {
+      try {
+        const bytes = await bot.download(ref)
+        const sha256 = createHash('sha256').update(bytes).digest('hex')
+        const name = safeFileName(ref.name, ref.kind)
+        const path = join(dir, `${sha256.slice(0, 8)}-${name}`)
+        await mkdir(dir, { recursive: true })
+        const fresh = !existsSync(path)
+        if (fresh) await writeFile(path, bytes)
+        const record = {
+          at: new Date().toISOString(),
+          kind: ref.kind,
+          name,
+          bytes: bytes.length,
+          sha256,
+          path,
+          duplicate: !fresh,
+        }
+        if (fresh) {
+          await appendFile(join(journalDir, 'attachments', 'index.jsonl'), `${JSON.stringify(record)}\n`, 'utf8')
+          log(`已保存微信附件：${path}`)
+        }
+        saved.push(record)
+        if (fresh) {
+          try {
+            await journalCommand(['add', '--type', 'ref',
+              '--text', `${ATTACHMENT_KIND_LABEL[ref.kind] || '附件'}：${name}`,
+              '--note', `本地文件 ${path}`, '--src', 'wechat'])
+          } catch (error) {
+            log(`附件登记账本失败：${error.message}`)
+          }
+        }
+      } catch (error) {
+        log(`附件保存失败：${error.message}`)
+        failed.push(`${ATTACHMENT_KIND_LABEL[ref.kind] || '附件'}${ref.name ? `（${ref.name}）` : ''}：${error.message}`)
+      }
+    }
+    const lines = saved.map((record) => {
+      const where = `attachments/${month}/${record.path.split(/[\\/]/u).pop()}`
+      return `${record.duplicate ? '已存在' : '已保存'}${ATTACHMENT_KIND_LABEL[record.kind] || '附件'}：${record.name}（${humanBytes(record.bytes)}）→ ${where}`
+    })
+    for (const line of failed) lines.push(`未能保存${line}`)
+    if (!lines.length) return
+    try {
+      await bot.sendText(lines.join('\n'))
+    } catch (error) {
+      log(`附件回执失败：${error.message}`)
+    }
+  }
+
   async function handleMessage(event) {
+    // Files and photos arrive without text; save them before anything else so a
+    // dropped caption never costs the document.
+    if (Array.isArray(event.attachmentRefs) && event.attachmentRefs.length) {
+      await saveAttachments(event)
+    }
     if (!event.text?.trim()) return
     if (event.from !== bot.credential?.ilink_user_id) return
     const key = `wechat:${event.from}`
@@ -762,6 +899,8 @@ export function apply(ctx, config = {}) {
       : Promise.resolve(result.item.title)
     if (input.source === 'wechat' && input.acknowledge !== false) void ackCaptured(titlePromise, result)
     else void titlePromise.catch(error => log(`资料标题更新失败：${error.code || error.name || 'unknown'}`))
+    // The body is what a digest needs, and it is independent of the title.
+    void ensureBody(result.item.id, url).catch(error => log(`正文抓取失败：${error.code || error.name || 'unknown'}`))
     return result
   }
 
@@ -807,12 +946,46 @@ export function apply(ctx, config = {}) {
     return title
   }
 
+  /**
+   * Store the article body once, so the weekly digest can summarise content
+   * instead of inferring it from a headline.
+   */
+  async function ensureBody(id, url) {
+    const wanted = await store.read((data) => {
+      const item = data.items.find((entry) => entry.id === id)
+      return Boolean(item && !item.body && item.status !== 'dropped')
+    })
+    if (!wanted) return false
+    const article = await pythonArticle(url, pythonOverride)
+    if (!article) {
+      await store.mutate((data) => {
+        const item = data.items.find((entry) => entry.id === id)
+        if (item) item.bodyError = lastBodyError
+      })
+      return false
+    }
+    await store.mutate((data) => {
+      const item = data.items.find((entry) => entry.id === id)
+      if (!item || item.body) return
+      item.body = article.body.slice(0, BODY_LIMIT)
+      item.bodyChars = article.chars
+      item.bodyAt = new Date().toISOString()
+      delete item.bodyError
+      if (article.title && needsTitle(item)) {
+        item.title = article.title
+        item.titleResolved = true
+      }
+      if (!item.summary && article.description) item.summary = article.description.slice(0, 500)
+      item.updatedAt = new Date().toISOString()
+    })
+    return true
+  }
+
   const retryTimers = new Set()
   ctx.effect(() => () => {
     for (const timer of retryTimers) clearTimeout(timer)
     retryTimers.clear()
   })
-
   /** Titles that failed once often succeed a few minutes later. */
   function scheduleRetry(id, url, retriesLeft) {
     const delay = 2 * 60 * 1000 * Math.pow(4, 2 - retriesLeft)
@@ -1161,14 +1334,56 @@ ${pick}
       const updated = []
       for (const [itemId, url] of targets) {
         const title = await enrich(itemId, url)
-        if (title) updated.push({ id: itemId, title })
+        const body = await ensureBody(itemId, url)
+        if (title || body) updated.push({ id: itemId, title, body })
       }
       return {
         refreshed: targets.length,
         updated,
         python: await resolvePython(pythonOverride),
         errors: lastMetaError ? [lastMetaError] : [],
+        bodyErrors: lastBodyError ? [lastBodyError] : [],
       }
+    },
+  })
+
+  tool({
+    name: 'reading_attachments',
+    description:
+      '列出从微信保存下来的附件（发票、合同、图片等本地文件），可按月份过滤。用户问“上个月的发票在哪”时调用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        month: { type: 'string', description: '月份，形如 2026-11；省略则列出全部。' },
+        limit: { type: 'number', description: '最多返回多少条，默认 50。' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(args, value) {
+        if (!value.items.length) return textBlock(value.total ? '该月份没有附件。' : '还没有保存过附件。')
+        const lines = value.items.map((item) => `${String(item.at || '').slice(0, 10)} · ${item.name}（${item.kind}，${item.bytes} B）· ${item.path}`)
+        return textBlock(`共 ${value.total} 个附件：\n${lines.join('\n')}`)
+      },
+    },
+    async execute(args) {
+      const month = pickString(args && args.month, 10)
+      const limit = Math.max(1, Math.min(200, Number((args && args.limit) || 50) || 50))
+      const file = join(journalDir, 'attachments', 'index.jsonl')
+      if (!existsSync(file)) return { items: [], total: 0 }
+      const items = []
+      for (const line of (await readFile(file, 'utf8')).split('\n')) {
+        if (!line.trim()) continue
+        try {
+          const record = JSON.parse(line)
+          if (month && !String(record.at || '').startsWith(month)) continue
+          items.push(record)
+        } catch {
+          /* a torn line should not hide the rest */
+        }
+      }
+      return { items: items.slice(-limit).reverse(), total: items.length }
     },
   })
 

@@ -143,16 +143,19 @@ test('WeChat follows the journal schedule session and immediately follows its ne
   assert.deepEqual((await llm.chat({ text: '连接测试' })).model, next)
 })
 
-test('missing journal schedules use ordinary discovery, while unreadable task models fail without guessing', async () => {
+test('missing journal schedules use ordinary discovery, while unreadable task models fall back without guessing', async () => {
   const { llm } = fixture()
   llm.schedule = { catalog: async () => [] }
   llm.sessionController = { projections: async () => { assert.fail('no scheduled session') } }
   assert.equal((await llm.route()).provider, 'custom')
   llm.schedule.catalog = async () => [{ id: 'daily', title: '晚间收口', sessionId: 'journal', status: 'active' }]
   llm.sessionController.projections = async () => { throw new Error('private session contents') }
-  await assert.rejects(llm.route(), { code: 'MODEL_SCHEDULE_UNAVAILABLE' })
+  // DSH releases differ here; an unreadable task session must degrade to the
+  // ordinary candidates rather than blocking every model call.
+  const fallback = await llm.route()
+  assert.equal(fallback.provider, 'custom')
   const status = await llm.diagnostics()
-  assert.equal(status.route_error, 'MODEL_SCHEDULE_UNAVAILABLE')
+  assert.equal(status.route_error, undefined)
   assert.ok(!JSON.stringify(status).includes('private session'))
 })
 

@@ -9,11 +9,15 @@
  * desktop client is involved.
  */
 import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises'
+import { createDecipheriv } from 'node:crypto'
 import { join } from 'node:path'
 
 const BASE = 'https://ilinkai.weixin.qq.com'
+const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 const CLIENT_VERSION = 0x00020a0a
 const CHANNEL_VERSION = '2.4.10'
+
+const MEDIA_KINDS = { 2: 'image', 3: 'voice', 4: 'file', 5: 'video' }
 
 const URL_RE = /https?:\/\/[^\s<>"'）)】，。；]+/gu
 
@@ -73,6 +77,44 @@ function messageText(msg) {
   return parts.filter(Boolean).join('\n')
 }
 
+/**
+ * The downloadable part of one message item.
+ *
+ * Images carry their own key (`image_item.aeskey`), files carry theirs on
+ * `media.aes_key`; both point at the same CDN download flow.
+ */
+function attachmentOf(item) {
+  const kind = MEDIA_KINDS[item.type]
+  if (!kind) return null
+  const holder = item.image_item || item.voice_item || item.file_item || item.video_item || {}
+  const media = holder.media || item.media || null
+  if (!media || (!media.full_url && !media.encrypt_query_param)) return null
+  return {
+    kind,
+    itemType: item.type,
+    name: String(holder.file_name || holder.fileName || ''),
+    bytes: Number(holder.len || holder.mid_size || holder.video_size || 0) || 0,
+    aesKey: String((item.image_item && item.image_item.aeskey) || media.aes_key || ''),
+    media,
+  }
+}
+
+/** The CDN key arrives as base64 of either 16 raw bytes or a 32-char hex string. */
+function decodeKey(raw) {
+  if (!raw || typeof raw !== 'string') return null
+  const buf = Buffer.from(raw, 'base64')
+  if (buf.length === 16) return buf
+  const text = buf.toString('utf8')
+  if (/^[0-9a-fA-F]{32}$/u.test(text)) return Buffer.from(text, 'hex')
+  return null
+}
+
+function decryptEcb(payload, key) {
+  const decipher = createDecipheriv('aes-128-ecb', key, null)
+  decipher.setAutoPadding(true)
+  return Buffer.concat([decipher.update(payload), decipher.final()])
+}
+
 export class WeChatBot {
   constructor({ dir, onMessage, log = () => {} }) {
     this.dir = dir
@@ -130,7 +172,12 @@ export class WeChatBot {
   }
 
   async saveEvents() {
-    const payload = JSON.stringify(this.events.slice(-100), null, 2)
+    // Download references carry keys; they live in memory only.
+    const payload = JSON.stringify(
+      this.events.slice(-100).map(({ attachmentRefs, ...rest }) => rest),
+      null,
+      2,
+    )
     this.eventsWrite = this.eventsWrite.then(async () => {
       await mkdir(this.dir, { recursive: true })
       const tmp = `${this.eventsFile}.tmp`
@@ -271,6 +318,7 @@ export class WeChatBot {
     }
     const text = messageText(msg)
     const urls = extractUrls(text)
+    const attachments = (msg.item_list || []).map(attachmentOf).filter(Boolean)
     const event = {
       id: String(msg.message_id || msg.client_id || ''),
       journal_route: 'pending',
@@ -280,7 +328,10 @@ export class WeChatBot {
       text: text.slice(0, 2000),
       urls,
       itemTypes: (msg.item_list || []).map((item) => item.type),
+      attachments: attachments.map(({ kind, name, bytes, itemType }) => ({ kind, name, bytes, itemType })),
     }
+    // Full references stay off the persisted event log (they carry keys).
+    event.attachmentRefs = attachments
     this.lastMessageAt = Date.parse(event.at)
     this.events.push(event)
     if (this.events.length > 100) this.events.shift()
@@ -290,6 +341,27 @@ export class WeChatBot {
     } catch (error) {
       this.log(`处理微信消息失败：${error && error.message}`)
     }
+  }
+
+  /** Fetch and decrypt one inbound attachment from the WeChat CDN. */
+  async download(attachment) {
+    const media = (attachment && attachment.media) || {}
+    const url = media.full_url
+      || `${CDN_BASE}/download?encrypted_query_param=${encodeURIComponent(media.encrypt_query_param || '')}`
+    if (!media.full_url && !media.encrypt_query_param) throw new Error('缺少下载参数')
+    const res = await fetch(url, {
+      headers: {
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36',
+        accept: '*/*',
+      },
+      signal: timeoutSignal(90000),
+    })
+    if (!res.ok) throw new Error(`下载失败：HTTP ${res.status}`)
+    let bytes = Buffer.from(await res.arrayBuffer())
+    const key = decodeKey(attachment.aesKey)
+    if (key) bytes = decryptEcb(bytes, key)
+    else if (attachment.kind !== 'image') throw new Error('缺少解密密钥，无法保存该附件')
+    return bytes
   }
 
   async sendText(text) {
@@ -349,3 +421,6 @@ export class WeChatBot {
     this.listenTask = null
   }
 }
+
+/** Internals exposed for tests only; not part of the plugin contract. */
+export const _testing = { attachmentOf, decodeKey, decryptEcb }
