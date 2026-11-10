@@ -206,29 +206,44 @@ export class JournalLlm {
   }
 
   async scheduledRoute(signal) {
-    if (!this.schedule?.catalog || !this.sessionController?.projections) return null
+    // Local compatibility patch: DSH releases differ in how they expose the
+    // schedule service (`catalog()` vs `list()`) and per-session projections.
+    // Anything unreadable degrades to null so the other selection paths run
+    // instead of failing the whole call.
+    if (!this.schedule || !this.sessionController?.projections) return null
     const query = new AbortController()
     const onAbort = () => query.abort(signal.reason)
     signal?.throwIfAborted()
     signal?.addEventListener('abort', onAbort, { once: true })
     try {
-      const catalog = await this.discover(() => this.schedule.catalog(), query.signal)
+      const raw = await this.discover(() => {
+        if (typeof this.schedule.catalog === 'function') return this.schedule.catalog()
+        if (typeof this.schedule.list === 'function') return this.schedule.list({})
+        return null
+      }, query.signal)
+      const catalog = Array.isArray(raw) ? raw
+        : Array.isArray(raw?.tasks) ? raw.tasks
+          : Array.isArray(raw?.items) ? raw.items
+            : []
       const names = ['晚间收口', '周报压实', '微信兜底扫描']
       const normalize = path => path.replaceAll('\\', '/')
-      const tasks = catalog.filter(t => t.status === 'active' && names.includes(t.title) &&
+      const tasks = catalog.filter(t => t && t.status === 'active' && names.includes(t.title) &&
         (!this.journalDir || typeof t.prompt === 'string' && normalize(t.prompt).includes(normalize(this.journalDir))))
-        .sort((a, b) => names.indexOf(a.title) - names.indexOf(b.title) || a.id.localeCompare(b.id))
+        .sort((a, b) => names.indexOf(a.title) - names.indexOf(b.title) || String(a.id).localeCompare(String(b.id)))
       if (!tasks.length) return null
       const task = tasks[0]
-      const projection = await this.discover(() => this.sessionController.projections({ sessionId: task.sessionId }, query.signal), query.signal)
+      const sessionId = task.sessionId || task.session_id || task.target?.sessionId
+      if (!sessionId) return null
+      const projection = await this.discover(() => this.sessionController.projections({ sessionId }, query.signal), query.signal)
       const model = projection?.values?.modelSelection
       const route = model?.next || model?.lastUsed
       // A session with no model choice uses the Harness default, just as the scheduler does.
       if (!route?.provider || !route?.model) return null
-      return { route, task: { id: task.id, title: task.title, session_id: task.sessionId } }
+      return { route, task: { id: task.id, title: task.title, session_id: sessionId } }
     } catch (error) {
       signal?.throwIfAborted()
-      throw failure('MODEL_SCHEDULE_UNAVAILABLE', '未能读取账本定时任务所属会话的模型选择')
+      this.status.selection = { ...this.status.selection, scheduleError: modelErrorCode(error) }
+      return null
     } finally {
       signal?.removeEventListener('abort', onAbort)
       query.abort()
