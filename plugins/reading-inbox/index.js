@@ -760,15 +760,32 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /** The part of a message that is a real caption, not the attachment's name. */
+  function captionText(event) {
+    let text = String(event.text || '')
+    for (const ref of event.attachmentRefs || []) {
+      if (ref.name) text = text.split(ref.name).join(' ')
+    }
+    return text.replace(/https?:\/\/\S+/gu, ' ').replace(/\s+/gu, ' ').trim()
+  }
+
   async function handleMessage(event) {
+    if (event.from !== bot.credential?.ilink_user_id) return
+    const key = `wechat:${event.from}`
     // Files and photos arrive without text; save them before anything else so a
     // dropped caption never costs the document.
     if (Array.isArray(event.attachmentRefs) && event.attachmentRefs.length) {
       await saveAttachments(event)
+      // A bare filename is not something to classify: the receipt already says
+      // what was saved, and asking the model about it only produces a question.
+      if (!captionText(event)) {
+        event.journal_route = 'attachment'
+        await bot.saveEvents()
+        await chat.dismiss(key)
+        return
+      }
     }
     if (!event.text?.trim()) return
-    if (event.from !== bot.credential?.ilink_user_id) return
-    const key = `wechat:${event.from}`
     const command = chatCommand(event.text)
     let recorded = false
     try {
