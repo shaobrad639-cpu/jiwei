@@ -246,6 +246,22 @@ export function apply(ctx, config = {}) {
         if (!id) throw new Error('缺少条目 id')
         return sendJson(res, 200, JSON.parse(await run(['detail', `--id=${id}`])))
       }
+      if (req.method === 'GET' && path === '/journal/api/invoices') {
+        const rows = []
+        try {
+          const text = await readFile(join(dataDir, 'attachments', 'index.jsonl'), 'utf8')
+          for (const line of text.split('\n')) {
+            if (!line.trim()) continue
+            try {
+              const row = JSON.parse(line)
+              if (row && row.invoice) rows.push({ seller: row.invoice.seller || '', amount: row.invoice.amount || '',
+                date: row.invoice.date || '', name: row.name || '', path: row.path || '' })
+            } catch { /* skip a torn line */ }
+          }
+        } catch { /* no attachments yet */ }
+        rows.sort((a, b) => String(b.date).localeCompare(String(a.date)))
+        return sendJson(res, 200, { items: rows.slice(0, 20) })
+      }
       if (req.method === 'GET' && path === '/journal/api/reading') {
         const data = await readJson(join(readingDir, 'inbox.json'))
         const items = (data && Array.isArray(data.items) ? data.items : [])

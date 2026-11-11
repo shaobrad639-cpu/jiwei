@@ -960,22 +960,38 @@ export function apply(ctx, config = {}) {
   }
 
   // “面板”：固定排版，分组 + 计数，像面板那样一眼扫完。
+  async function recentInvoices(limit = 5) {
+    const file = join(journalDir, 'attachments', 'index.jsonl')
+    if (!existsSync(file)) return []
+    const lines = (await readFile(file, 'utf8')).split('\n').filter(Boolean)
+    return lines.slice(-40).map((line) => { try { return JSON.parse(line) } catch { return null } })
+      .filter((row) => row && row.invoice)
+      .sort((a, b) => String(b.invoice.date || '').localeCompare(String(a.invoice.date || '')))
+      .slice(0, limit)
+  }
+
   async function readPanelText() {
     const snapshot = await journalCommand(['chat-context'])
     const tasks = (snapshot.items || []).filter((item) => item.type === 'task' && item.status === 'open')
-    const today = localDay()
+    const now = new Date()
+    const today = localDay(now)
+    const yesterday = localDay(new Date(Date.parse(`${today}T00:00:00+08:00`) - 86400000))
     const clock = (item) => (item.at && (item.at.clock || item.at.slot)) || ''
-    const timed = tasks.filter((item) => item.at && item.at.date)
-      .sort((a, b) => `${a.at.date}${clock(a)}`.localeCompare(`${b.at.date}${clock(b)}`))
+    const stamp = (item) => `${item.at.date}${clock(item)}`
+    const timed = tasks.filter((item) => item.at && item.at.date).sort((a, b) => stamp(a).localeCompare(stamp(b)))
     const todayItems = timed.filter((item) => item.at.date === today)
-    const overdue = timed.filter((item) => item.at.date < today)
-    const untimed = tasks.filter((item) => !(item.at && item.at.date))
+    const earlier = timed.filter((item) => item.at.date <= yesterday)
+    const isMoney = (item) => /报销|发票/u.test(item.text)
+    const reimburse = tasks.filter(isMoney)
+    const untimed = tasks.filter((item) => !(item.at && item.at.date) && !isMoney(item))
     const reading = await store.read((data) => data.items
       .filter((item) => item.status === 'inbox' || item.status === 'later')
       .sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')))
       .slice(0, 3))
+    const invoices = await recentInvoices(5)
     const dateLabel = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', weekday: 'short' })
-      .format(new Date())
+      .format(now)
+    const shortDate = (value) => String(value || '').replace(/^\d{4}年?/, '').replace(/-/gu, '/')
     const lines = []
     const section = (title, rows) => {
       if (!rows.length) return
@@ -984,8 +1000,14 @@ export function apply(ctx, config = {}) {
       lines.push(...rows)
     }
     section(`今天 · ${dateLabel}`, todayItems.map((item) => `${clock(item) || '全天'}　${item.text}`))
-    section(`过期未完成 ${overdue.length}`, overdue.map((item) => `${clock(item) || '全天'}　${item.text}`))
+    section(`昨天回顾 ${earlier.length}`, earlier.slice(-6).map((item) => item.at.date === yesterday
+      ? `${clock(item) || '全天'}　${item.text}`
+      : `${shortDate(item.at.date)} ${clock(item)}　${item.text}`))
     section(`待办 ${untimed.length}`, untimed.slice(0, 6).map((item) => `· ${item.text}`))
+    section(`报销 ${reimburse.length + invoices.length}`, [
+      ...reimburse.slice(0, 4).map((item) => `· ${item.text}（待办）`),
+      ...invoices.map((row) => `· ${row.invoice.seller || row.name}　¥${row.invoice.amount || '—'}　${shortDate(row.invoice.date)}`),
+    ])
     section(`收藏待读 ${reading.length}`, reading.map((item) => `· ${item.title || item.url}`))
     if (!lines.length) return { receipt: '今天没有安排，待办和收藏也是空的。' }
     lines.push('', `未完成共 ${tasks.length} 条`)
