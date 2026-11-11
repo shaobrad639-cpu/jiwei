@@ -8,7 +8,7 @@
  * It talks only to ilinkai.weixin.qq.com. No WeChat local data is read and no
  * desktop client is involved.
  */
-import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, rm, appendFile } from 'node:fs/promises'
 import { createDecipheriv } from 'node:crypto'
 import { join } from 'node:path'
 
@@ -391,6 +391,9 @@ export class WeChatBot {
     if ((result.ret !== undefined && result.ret !== 0) || (result.errcode !== undefined && result.errcode !== 0)) {
       throw Object.assign(new Error('微信未接受这条消息'), { code: 'WECHAT_SEND_FAILED' })
     }
+    // 发送审计：排查重复回执时，能看到每一次实际发出的消息。
+    void appendFile(join(this.dir, 'send.log'), `${new Date().toISOString()}\t${String(text).slice(0, 60).replace(/\n/gu, ' ')}\n`, 'utf8')
+      .catch(() => {})
     return result
   }
 
