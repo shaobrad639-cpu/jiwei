@@ -11,4 +11,4 @@ git diff --quiet && git diff --cached --quiet || { echo "工作区还有未提�
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null && { echo "标签 $tag 已存在。" >&2; exit 1; }
 git tag -a "$tag" -m "$tag"
 git push origin main "refs/tags/$tag"
-echo "已推送 $tag。几十秒后自动出现在：$(git remote get-url origin | sed 's#git@github.com:#https://github.com/#' | sed 's#\.git$##')/releases"
+echo "已推送 ${tag}，几十秒后自动出现在：$(git remote get-url origin | sed 's#git@github.com:#https://github.com/#' | sed 's#\.git$##')/releases"
