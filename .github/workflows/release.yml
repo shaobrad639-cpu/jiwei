@@ -12,11 +12,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build release notes from commits
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          {
+            echo "## 变更"
+            echo
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty=format:'- %s（%h）' "$prev..$GITHUB_REF_NAME"
+            else
+              git log --no-merges --pretty=format:'- %s（%h）' "$GITHUB_REF_NAME"
+            fi
+            echo
+            if [ -n "$prev" ]; then
+              echo
+              echo "完整对比：https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+            fi
+          } > notes.md
+          cat notes.md
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            ${PRERELEASE:+--prerelease}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
