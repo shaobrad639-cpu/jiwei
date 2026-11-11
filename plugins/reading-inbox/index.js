@@ -84,6 +84,16 @@ function localDay(date = new Date()) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
 }
 
+/** 开票日期（2026年10月23日 或 2026-10-23）→ 归档月份 2026-10。 */
+export function invoiceMonth(date) {
+  if (typeof date !== 'string') return ''
+  const chinese = /(\d{4})\s*年\s*(\d{1,2})\s*月/.exec(date)
+  if (chinese) return `${chinese[1]}-${chinese[2].padStart(2, '0')}`
+  const iso = /(\d{4})-(\d{2})-\d{2}/.exec(date)
+  if (iso) return `${iso[1]}-${iso[2]}`
+  return ''
+}
+
 function pickStatus(value) {
   return STATUSES.includes(value) ? value : undefined
 }
@@ -714,7 +724,7 @@ export function apply(ctx, config = {}) {
         const bytes = await bot.download(ref)
         const sha256 = createHash('sha256').update(bytes).digest('hex')
         const name = safeFileName(ref.name, ref.kind)
-        const path = join(dir, `${sha256.slice(0, 8)}-${name}`)
+        let path = join(dir, `${sha256.slice(0, 8)}-${name}`)
         await mkdir(dir, { recursive: true })
         const fresh = !existsSync(path)
         if (fresh) await writeFile(path, bytes)
@@ -740,6 +750,20 @@ export function apply(ctx, config = {}) {
             }
           } else if (invoice && invoice.error) {
             record.invoiceError = invoice.error
+          }
+        }
+        // 发票按开票日期归档，不看它哪天转到微信里。
+        if (fresh && record.invoice?.date) {
+          const invoiceMonthKey = invoiceMonth(record.invoice.date)
+          if (invoiceMonthKey && invoiceMonthKey !== month) {
+            const targetDir = join(journalDir, 'attachments', invoiceMonthKey)
+            const target = join(targetDir, `${sha256.slice(0, 8)}-${name}`)
+            await mkdir(targetDir, { recursive: true })
+            await rename(path, target)
+            path = target
+            record.path = target
+            record.filedBy = 'invoice'
+            log(`发票按开票日期归档：${invoiceMonthKey}`)
           }
         }
         if (fresh) {
