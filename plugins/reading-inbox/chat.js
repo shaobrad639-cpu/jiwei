@@ -242,8 +242,17 @@ export class JournalChat {
       const journal = chatSnapshot(snapshot)
       const history = historyOf(state)
       const urls = [...new Set([...(event.urls || []), ...(pending?.sources.flatMap(s => extractUrls(s.text)) || [])])]
-      let decision = await this.llm.classify({ text, received_at: source.at, urls,
-        history, journal, rules, pending, now: new Date().toISOString(), timezone: 'Asia/Shanghai' })
+      const classifyInput = { text, received_at: source.at, urls,
+        history, journal, rules, pending, now: new Date().toISOString(), timezone: 'Asia/Shanghai' }
+      let decision
+      try {
+        decision = await this.llm.classify(classifyInput)
+      } catch (error) {
+        // 模型服务偶发失败（限流、上游抖动）时重试一次，别让一条待办直接丢掉。
+        if (!/^MODEL_(CALL_FAILED|TIMEOUT)$/u.test(error?.code || '')) throw error
+        await new Promise(resolve => setTimeout(resolve, 800))
+        decision = await this.llm.classify(classifyInput)
+      }
       const latest = state.turns.filter(t => t.delivered !== false).at(-1)
       const invalidConfirmation = decision.intent === 'confirm' && (!pending || !decision.continuation)
       const vagueConfirmation = bareConfirmation(text) &&

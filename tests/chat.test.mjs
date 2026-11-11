@@ -212,6 +212,29 @@ test('article fetcher refuses loopback and private addresses', () => {
   assert.equal(payload.body, '')
 })
 
+test('transient model failures are retried once; invalid responses are not', async t => {
+  const { dir } = fixture(t)
+  const reply = { intent: 'chat', continuation: false, collect_refs: false, reply: '好', items: [],
+    model: { provider: 'p', model: 'm' } }
+  const handlers = { mark: async () => {}, record: async () => ({ receipt: '' }), digest: async () => ({ receipt: '' }) }
+  let attempts = 0
+  const flaky = { classify: async () => {
+    attempts += 1
+    if (attempts === 1) throw Object.assign(new Error('上游抖了一下'), { code: 'MODEL_CALL_FAILED' })
+    return reply
+  } }
+  const first = await new JournalChat({ dir, llm: flaky, context: async () => ({ projects: [], items: [], notebook: '' }) })
+    .route('wx', { text: '中午订餐', ev: 'r1' }, handlers)
+  assert.equal(attempts, 2, '失败后应重试一次')
+  assert.equal(first.reply, '好')
+
+  let invalid = 0
+  const broken = { classify: async () => { invalid += 1; throw Object.assign(new Error('格式不对'), { code: 'MODEL_RESPONSE_INVALID' }) } }
+  await assert.rejects(new JournalChat({ dir, llm: broken, context: async () => ({ projects: [], items: [], notebook: '' }) })
+    .route('wx', { text: '中午订餐', ev: 'r2' }, handlers), { code: 'MODEL_RESPONSE_INVALID' })
+  assert.equal(invalid, 1, '格式错误不应重试')
+})
+
 test('WeChat routes chat, followups, explicit notes and mode changes; ingest excludes conversation', async t => {
   const { dir, journal } = fixture(t)
   let bot
