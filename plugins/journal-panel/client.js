@@ -77,12 +77,21 @@ window.__ModuleLoader__.load({
 .jp-stat { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .jp-stat b { font-size: 20px; font-weight: 600; color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; }
 .jp-stat span { font-size: 11px; color: var(--dsw-alias-label-secondary); }
-.jp-today { display: flex; flex-direction: column; gap: 24px; }
-.jp-today-row { display: flex; align-items: baseline; gap: 12px; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); padding: 10px 2px; font: inherit; color: var(--dsw-alias-label-primary); cursor: pointer; }
-.jp-today-row:last-child { border-bottom: 0; }
-.jp-today-time { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); min-width: 52px; }
-.jp-today-text { flex: 1; font-size: 15px; overflow-wrap: anywhere; }
-.jp-today-tag { font-size: 11px; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-2); border-radius: 999px; padding: 2px 8px; }
+.jp-today { display: flex; flex-direction: column; gap: 16px; }
+.jp-today-block { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1); border-radius: 16px; padding: 16px 18px 6px; }
+.jp-today-block.warn { border-color: var(--dsw-alias-state-error-primary); }
+.jp-today-head { display: flex; align-items: baseline; gap: 8px; padding: 0 2px 8px; }
+.jp-today-title { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.jp-today-count { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-2); border-radius: 999px; padding: 1px 8px; }
+.jp-today-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; align-items: center; gap: 12px; width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--dsw-alias-border-l1); padding: 11px 4px; font: inherit; color: var(--dsw-alias-label-primary); cursor: pointer; }
+.jp-today-head + .jp-today-row { border-top: 0; }
+.jp-today-row:hover { background: var(--dsw-alias-bg-layer-2); }
+.jp-today-time { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); white-space: nowrap; text-align: right; }
+.jp-today-time.strong { color: var(--dsw-alias-brand-primary); font-weight: 600; }
+.jp-today-text { font-size: 14.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.jp-today-tag { font-size: 11px; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-2); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+.jp-today-empty { padding: 6px 4px 14px; font-size: 13px; color: var(--dsw-alias-label-secondary); }
+.jp-today-date { margin-top: 4px; font-size: 13px; color: var(--dsw-alias-label-secondary); }
 .jp-tabs { display: flex; gap: 6px; margin: 26px 0 18px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .jp-tab { appearance: none; background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 10px 10px; margin-bottom: -1px; font-size: 13px; color: var(--dsw-alias-label-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .jp-tab[data-active="true"] { color: var(--dsw-alias-label-primary); border-bottom-color: var(--dsw-alias-brand-primary); font-weight: 550; }
@@ -1148,190 +1157,32 @@ window.__ModuleLoader__.load({
     function TodayTab({ state, reading, onEdit }) {
       const day = todayKey()
       const tasks = (state.items || []).filter((item) => item.type === 'task' && item.status === 'open')
+      const stamp = (item) => `${item.at.date}${item.at.clock || item.at.slot || ''}`
       const timed = tasks.filter((item) => item.at && item.at.date)
-        .sort((a, b) => `${a.at.date}${a.at.clock || a.at.slot || ''}`.localeCompare(`${b.at.date}${b.at.clock || b.at.slot || ''}`))
+        .sort((a, b) => stamp(a).localeCompare(stamp(b)))
       const today = timed.filter((item) => item.at.date === day)
       const overdue = timed.filter((item) => item.at.date < day)
       const untimed = tasks.filter((item) => !(item.at && item.at.date))
       const projectName = (id) => (state.projects || []).find((p) => p.id === id)?.name || ''
-      const row = (item, withTime) => h('button', { key: item.id, className: 'jp-today-row', onClick: () => onEdit(item.id) },
-        withTime ? h('span', { className: 'jp-today-time' }, item.at.clock || item.at.slot || '—') : null,
+      const row = (item, withTime) => h('button', { key: item.id, className: 'jp-today-row',
+        onClick: onEdit ? () => onEdit(item.id) : undefined },
+        h('span', { className: withTime ? 'jp-today-time strong' : 'jp-today-time' },
+          withTime ? (item.at.clock || item.at.slot || '·') : ''),
         h('span', { className: 'jp-today-text' }, item.text),
         item.project ? h('span', { className: 'jp-today-tag' }, projectName(item.project)) : null)
+      const block = (title, count, rows, empty, warn) => h('section', { className: warn ? 'jp-today-block warn' : 'jp-today-block' },
+        h('div', { className: 'jp-today-head' },
+          h('span', { className: 'jp-today-title' }, title),
+          h('span', { className: 'jp-today-count' }, String(count))),
+        rows.length ? rows : h('p', { className: 'jp-today-empty' }, empty))
       return h('div', { className: 'jp-today' },
-        h('section', { className: 'jp-today-block' },
-          h('h3', { className: 'jp-section-title' }, `今天 · ${today.length} 件`),
-          today.length ? today.map((item) => row(item, true)) : h('p', { className: 'jp-empty' }, '今天没有安排。')),
-        overdue.length ? h('section', { className: 'jp-today-block' },
-          h('h3', { className: 'jp-section-title' }, `过期未完成 · ${overdue.length} 件`),
-          overdue.map((item) => row(item, true))) : null,
-        h('section', { className: 'jp-today-block' },
-          h('h3', { className: 'jp-section-title' }, `待办 · ${untimed.length} 件`),
-          untimed.length ? untimed.slice(0, 8).map((item) => row(item, false)) : h('p', { className: 'jp-empty' }, '没有待办。')),
-        h('section', { className: 'jp-today-block' },
-          h('h3', { className: 'jp-section-title' }, `未读收藏 · ${reading.length} 条`),
-          reading.length ? reading.map((item) => h('div', { key: item.id, className: 'jp-today-row' },
-            h('span', { className: 'jp-today-time' }, item.status === 'later' ? '稍后' : '待读'),
-            h('span', { className: 'jp-today-text' }, item.title),
-            item.hasBody ? null : h('span', { className: 'jp-today-tag' }, '无正文')))
-            : h('p', { className: 'jp-empty' }, '收藏是空的。')),
-      )
-    }
-
-    function Page() {
-      const [state, setState] = useState(null)
-      const [tab, setTab] = useState('today')
-      const [reading, setReading] = useState([])
-      const [editingId, setEditingId] = useState(null)
-      const [notice, setNotice] = useState('')
-      const [error, setError] = useState('')
-      const [loadError, setLoadError] = useState('')
-      const loadSequence = useRef(0)
-
-      const load = useCallback(async () => {
-        const request = ++loadSequence.current
-        try {
-          const [next, shelf] = await Promise.all([api('state'), api('reading').catch(() => ({ items: [] }))])
-          if (!Array.isArray(next.projects) || !Array.isArray(next.items) || !next.stats) throw new Error('账本数据格式异常')
-          if (request === loadSequence.current) {
-            setState(next)
-            setReading(Array.isArray(shelf.items) ? shelf.items : [])
-            setLoadError('')
-          }
-        } catch (e) {
-          if (request === loadSequence.current) setLoadError(e.message)
-        }
-      }, [])
-
-      useEffect(() => {
-        void load()
-        // 微信那边随时会进新东西，面板不能只在挂载时读一次
-        const timer = setInterval(() => void load(), 15000)
-        return () => clearInterval(timer)
-      }, [load])
-
-      const act = useCallback(
-        async (action, payload) => {
-          try {
-            setError('')
-            setNotice('')
-            const result = await api('action', { action, ...payload })
-            setNotice(actionNotice(action, payload, result))
-            await load()
-            return result
-          } catch (e) {
-            setError(e.message)
-            return false
-          }
-        },
-        [load],
-      )
-
-      const [query, setQuery] = useState('')
-      const [search, setSearch] = useState(null)
-      useEffect(() => {
-        const text = query.trim()
-        if (!text) { setSearch(null); return undefined }
-        let active = true
-        const timer = setTimeout(async () => {
-          try {
-            const hits = await api(`search?q=${encodeURIComponent(text)}`)
-            if (!Array.isArray(hits)) throw new Error('搜索结果格式异常')
-            if (active) setSearch({ query: text, hits })
-          } catch (e) { if (active) setSearch({ query: text, error: e.message }) }
-        }, 300)
-        return () => { active = false; clearTimeout(timer) }
-      }, [query])
-
-      if (!state) return h('div', { className: 'jp-root' },
-        h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
-        h('div', { className: 'jp-inner' }, loadError ? h(LoadError, { error: loadError, retry: load })
-          : h('div', { className: 'jp-loading', role: 'status' }, '读取中…')))
-
-      return h(
-        'div',
-        { className: 'jp-root' },
-        h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
-        h(
-          'div',
-          { className: 'jp-inner' },
-          h('header', { className: 'jp-head' }, h('h1', { className: 'jp-title' }, '账本')),
-          h('nav', { className: 'jp-tabs', 'aria-label': '账本导航' },
-            [['today','今天'],['now','待办'],['projects','项目'],['notebook','本子'],['ideas','想法'],['activity','活动']].map(([key,label]) =>
-              h('button', { key, className: 'jp-tab', 'data-active': String(tab === key), 'aria-pressed': tab === key, onClick: () => setTab(key) }, label))),
-          editingId ? h(ItemDetail, {
-            key: editingId, id: editingId, projects: state.projects,
-            onClose: () => setEditingId(null),
-            onSave: async patch => {
-              const result = await api('action', { action: 'item.set', ...patch })
-              await load()
-              return result
-            },
-            onSaved: (type, corrected, result) => {
-              setEditingId(null)
-              if (corrected) setTab(type === 'task' ? 'now' : 'ideas')
-              setNotice(Array.isArray(result.changed) && !result.changed.length ? '内容未变化，无需更新。' : corrected ? `已改为${type === 'task' ? '待办' : '想法'}，来源和修改历史已保留。` : '条目修改已保存。')
-            },
-          }) : null,
-          notice ? h('div', { className: 'jp-notice', role: 'status' }, notice,
-            h('button', { className: 'jp-act', onClick: () => setNotice('') }, '关闭提示')) : null,
-          loadError ? h(LoadError, { error: loadError, retry: load }) : null,
-          error ? h('div', { className: 'jp-error', role: 'alert' }, `操作失败：${error}`,
-            h('button', { className: 'jp-act', onClick: () => setError('') }, '关闭提示')) : null,
-          h(
-            'div',
-            { className: 'jp-searchrow' },
-            h('input', {
-              className: 'jp-input',
-              placeholder: '搜索账本…',
-              'aria-label': '搜索账本',
-              value: query,
-              onChange: (e) => setQuery(e.target.value),
-            }),
-          ),
-          query.trim() ? search?.query === query.trim()
-            ? search.error ? h('div', { className: 'jp-error', role: 'alert' }, `搜索失败：${search.error}`)
-              : h(SearchResults, { hits: search.hits, query: query.trim() })
-            : h('div', { className: 'jp-hint', role: 'status' }, '搜索中…') : null,
-          h('div', { hidden: tab !== 'today' }, h(TodayTab, { state, reading, onEdit: setEditingId })),
-          h('div', { hidden: tab !== 'now' }, h(TodoTab, { state, onEdit: setEditingId,
-            onSet: (id,patch) => act('item.set', { id, ...patch }), onAdd: payload => act('item.add', { type: 'task', ...payload }) })),
-          h('div', { hidden: tab !== 'projects' }, h(ProjectsTab, { state, onEdit: setEditingId,
-            onSave: (id, values) => act('project.set', { id, ...values }), onRemove: id => act('project.remove', { id }),
-            onAdd: name => act('project.add', { name }), onScan: () => act('sources.scan', {}), onAction:act })),
-          tab === 'ideas'
-            ? h(IdeasTab, {
-                state,
-                onEdit: setEditingId,
-                onSet: (id, patch) => act('item.set', { id, ...patch }),
-                onPromote: (id) => act('idea.promote', { id }),
-              })
-            : null,
-          h('div', { hidden:tab !== 'activity' }, h(ActivityTab, { state, onAction:act, onScan:()=>act('sources.scan',{}) })),
-          h('div', { hidden: tab !== 'notebook' }, h(NotebookTab, { state, onSave: payload => act('notebook.day.save', payload) })),
-        ),
-      )
-    }
-
-    function PanelIcon(props) {
-      const size = (props && props.size) || 18
-      return h(
-        'svg',
-        {
-          width: size,
-          height: size,
-          viewBox: '0 0 24 24',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 1.6,
-          strokeLinecap: 'round',
-          strokeLinejoin: 'round',
-          'aria-hidden': true,
-        },
-        h('path', { d: 'M6 3.5h9.5L19 7v13.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-16a1 1 0 0 1 1-1z' }),
-        h('path', { d: 'M15 3.5V7h3.5' }),
-        h('path', { d: 'M8.5 12h7' }),
-        h('path', { d: 'M8.5 16h4.5' }),
+        block('今天', today.length, today.map((item) => row(item, true)), '今天没有安排。'),
+        overdue.length ? block('过期未完成', overdue.length, overdue.map((item) => row(item, true)), '', true) : null,
+        block('待办', untimed.length, untimed.slice(0, 8).map((item) => row(item, false)), '没有待办。'),
+        block('未读收藏', reading.length, reading.map((item) => h('div', { key: item.id, className: 'jp-today-row' },
+          h('span', { className: 'jp-today-time' }, item.status === 'later' ? '稍后' : '待读'),
+          h('span', { className: 'jp-today-text' }, item.title),
+          item.hasBody ? null : h('span', { className: 'jp-today-tag' }, '无正文'))), '收藏是空的。'),
       )
     }
 
@@ -1353,7 +1204,11 @@ window.__ModuleLoader__.load({
         h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'jp-inner' },
           h('header', { className: 'jp-head' },
-            h('h1', { className: 'jp-title' }, '今天'),
+            h('div', null,
+              h('h1', { className: 'jp-title' }, '今天'),
+              h('p', { className: 'jp-today-date' }, new Intl.DateTimeFormat('zh-CN', {
+                timeZone: 'Asia/Shanghai', month: 'long', day: 'numeric', weekday: 'long',
+              }).format(new Date()).replace('星期', ' · 星期'))),
             h('button', { className: 'jp-act', onClick: () => { void load() } }, '刷新')),
           error ? h('div', { className: 'jp-error', role: 'alert' }, error) : null,
           editingId ? h(ItemDetail, { key: editingId, id: editingId, projects: state?.projects || [],
