@@ -21,3 +21,12 @@
 ## 协议
 
 沿用上游的 MIT 协议。分发时请保留 [LICENSE](LICENSE) 中的原始版权声明。
+
+本项目在此基础上做的修改：
+
+```
+Modifications Copyright (c) 2026 shaobrad639-cpu
+```
+
+LICENSE 文件本身保持上游原文（逐字比对才认得出 MIT），修改声明记在这里。
+
