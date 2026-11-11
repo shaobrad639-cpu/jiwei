@@ -17,6 +17,12 @@ plugin_manager set_plugin  target=include:reading-inbox  enabled=true
 - 改 `schedules/*.md` 的提示词**不用**重载（定时任务每次触发重新下发）
 - 改完先跑 `node --test tests/*.test.mjs` 和 `node scripts/check.mjs`
 
+## 发版与日常更新
+
+- 日常改完：`git add` → `commit` → `git push origin main`，**不打 tag、不建 Release**
+- 只有用户明确说「release」时才发版：`./scripts/release.sh v0.x.y`，tag 推上去后由 GitHub Actions 自动建 Release，说明按提交生成
+- 提交信息写具体：「feat(panel): 过期改为昨天回顾，新增报销模块」，不要写 update / fix bug
+
 ## 两条产品约定
 
 - 周报（周报压实）里，收藏文章只写一行摘要，不点评
