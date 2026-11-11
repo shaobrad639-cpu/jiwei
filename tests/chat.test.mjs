@@ -314,6 +314,10 @@ test('WeChat routes chat, followups, explicit notes and mode changes; ingest exc
   await receive('/退出聊天', 'stop')
   await receive('整理结果', 'new-note')
   assert.equal(journal(['state']).items.length, 2)
+  const beforeRepeat = sent.length
+  await receive('整理结果', 'new-note')
+  assert.equal(sent.length, beforeRepeat, '同一条消息重投时不应再发一遍回执')
+  assert.equal(journal(['state']).items.length, 2)
   await receive('出个周报', 'digest-write')
   const inbox = JSON.parse(readFileSync(join(dir, 'inbox', 'inbox.json'), 'utf8'))
   assert.equal(inbox.digests.length, 1)

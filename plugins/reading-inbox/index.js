@@ -834,10 +834,14 @@ export function apply(ctx, config = {}) {
         await bot.saveEvents()
         const id = createHash('sha256').update(`${event.from}\0${event.id || event.at}\0${event.text}`).digest('hex')
         const result = await chat.reply(key, event.text, id)
-        await sendReply(result.reply, event)
+        if (!result.duplicate) await sendReply(result.reply, event)
         return
       }
       const ev = eventKey(event)
+      // 微信会重投同一条消息；已经处理并送达过的，直接忽略，别再回一遍。
+      // 微信会重投同一条消息；已经送达过的，不再回第二遍。
+      const earlier = state.turns.find(turn => turn.id === ev)
+      if (earlier && earlier.delivered !== false) return
       // Preserve already registered, version-checked task choices without storing
       // arbitrary conversation while checking whether this is an old answer.
       if (!state.pending) {
@@ -1723,7 +1727,14 @@ ${pick}
       offset: { type: 'integer', minimum: 0 },
       limit: { type: 'integer', minimum: 1, maximum: 30 },
     }, required: ['mode'], additionalProperties: false },
-    output: { schema: { type: 'object', additionalProperties: true }, render() { return textBlock('已生成整理建议，尚未写入账本。确认后须另行保存。') } },
+    output: { schema: { type: 'object', additionalProperties: true }, render(args, value) {
+      // The model reads this text, not the structured value: without the
+      // findings, coverage and notebook hashes here, the review output is
+      // unusable and nothing can be saved back.
+      const payload = JSON.stringify(value ?? {}, null, 1)
+      const shown = payload.length > 12000 ? `${payload.slice(0, 12000)}\n…（已截断，先按 coverage.next_offset 继续分页）` : payload
+      return textBlock(`已生成整理建议，尚未写入账本。确认后须另行保存。\n\n${shown}`)
+    } },
     async execute(args) {
       if (!['daily', 'weekly'].includes(args?.mode)) throw new Error('mode 必须为 daily 或 weekly')
       const offset = args.offset ?? 0
@@ -1753,7 +1764,11 @@ ${pick}
       const lines = [`页内：项目 ${projects.length} · 条目 ${items.length}（未完成 ${open.length}） · 待核对来源 ${value.total ?? evidence.length} 条（本页 ${evidence.length}）`]
       if (projects.length) lines.push('项目：' + projects.slice(0, 10).map((p) => `${p.id}·${p.name}`).join('、'))
       if (open.length) lines.push('未完成：' + open.slice(0, 10).map((i) => `${i.id}·${i.text}`).join('、'))
-      for (const row of evidence.slice(0, 10)) lines.push(`来源 ${row.id} · ${row.kind || ''} · ${row.title || row.locator || ''}`)
+      for (const row of evidence.slice(0, 10)) {
+        lines.push(`来源 ${row.id} · ${row.kind || ''} · ${row.title || row.locator || ''} · version ${row.version ?? ''} · ${row.status || ''}`)
+        const excerpt = (row.excerpt || '').replace(/\s+/g, ' ').trim()
+        if (excerpt) lines.push(`  原文：${excerpt.length > 400 ? `${excerpt.slice(0, 400)}…` : excerpt}`)
+      }
       lines.push(value.next_offset === null || value.next_offset === undefined ? '已到最后一页。' : `还有来源未返回，继续分页：offset=${value.next_offset}`)
       return textBlock(lines.join('\n'))
     }},

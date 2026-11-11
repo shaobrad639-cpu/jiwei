@@ -24,6 +24,8 @@ SELLER_PATTERNS = (
     r"销售方(?:名称)?[：:]\s*([^\s\n]+)",
     r"销\s*售\s*方[^\n]{0,20}?名\s*称[：:]\s*([^\s\n]+)",
     r"销售方信息[^\n]*\n[^\n]*名\s*称[：:]\s*([^\s\n]+)",
+    # All-digital layout puts both names on one row: "购 名称：A 销 名称：B".
+    r"销\s*名称[：:]\s*([^\s\n]+)",
 )
 AMOUNT_PATTERNS = (
     r"[（(]小写[）)]\s*[¥￥]?\s*([0-9][0-9,]*\.\d{2})",
@@ -85,6 +87,15 @@ def _after(row, word, page_width):
     return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
 
+
+def _split_label(text, label):
+    """Return (is_label, inline_value) for "名称：" or "名称：某某店" in one word."""
+    match = re.match(rf"{label[0]}\s*{label[1:]}\s*[：:]\s*(.*)$", text)
+    if not match:
+        return False, ""
+    return True, match.group(1).strip()
+
+
 def _positional(page):
     """Read the value that sits beside each label.
 
@@ -98,12 +109,11 @@ def _positional(page):
     for row in rows:
         for word in row:
             text = unicodedata.normalize("NFKC", word["text"])
-            if text in ("名称:", "名称：") and not found["seller"]:
-                # Two name columns: left is the buyer, right is the seller.
+            label, value = _split_label(text, "名称")
+            if label and not found["seller"]:
+                # Two name columns: left is the buyer, the right one is the seller.
                 if word["x0"] > width * 0.4:
-                    value = _after(row, word, width)
-                    if value and ("公司" in value or "厂" in value or "店" in value):
-                        found["seller"] = value
+                    found["seller"] = value or _after(row, word, width)
             elif text.startswith("发票号码") and not found["number"]:
                 value = _after(row, word, width)
                 digits = re.sub(r"\D", "", value)

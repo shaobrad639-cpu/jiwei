@@ -317,8 +317,9 @@ test('WeChat default entry uses one classifier, asks then commits, and ingest ex
   assert.match(sent.at(-1), /^已加入待办：/)
   assert.equal(f.journal(['state']).items.length, 1)
   assert.equal(f.inputs.length, 3)
+  const sentBefore = sent.length
   await receive('确认', 'a')
-  assert.match(sent.at(-1), /未重复添加/)
+  assert.equal(sent.length, sentBefore, '重投已送达的消息不再回一遍')
   assert.equal(f.inputs.length, 3)
   const mixed = '明天写报告，我怀疑样本不足'
   f.output(decision('mixed', [row('写报告', '明天写报告'), row('样本不足', '我怀疑样本不足', { type: 'idea' })]))
