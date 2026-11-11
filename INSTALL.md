@@ -16,8 +16,8 @@
 ## 一键安装
 
 ```
-git clone https://github.com/CRYPTOCHROME384/DSH-Wechat-Journal.git
-cd DSH-Wechat-Journal
+git clone https://github.com/CRYPTOCHROME384/jiwei.git
+cd jiwei
 node install.mjs
 ```
 
@@ -193,3 +193,18 @@ Python 代码会更新；已有 `RULES.md` 保留，升级后需自行对比仓�
 ## 卸载
 
 删掉 profile `cordis.patch.yml` 里那段 `# >>> dsh-journal installer >>>` 注释块，从 `package.json` 移除两个依赖和 bundle，删掉 `node_modules/@local/` 下两个链接，重启。数据目录留着即可——它是纯文件，任何编辑器都能读。
+
+## 改了代码怎么生效（不用重启 App）
+
+服务端插件是随 DSH 进程加载的，但插件管理器支持热重载——禁用再启用会重新加载模块：
+
+```
+plugin_manager set_plugin  target=include:reading-inbox  enabled=false
+plugin_manager set_plugin  target=include:reading-inbox  enabled=true
+```
+
+面板里「设置 → 插件」关掉再打开同一个条目也行。实测约两秒，`reading_get`、`reading_list` 的改动会立即生效。
+
+代价：微信机器人断线重连几秒，期间到达的消息在重连后补收。
+
+需要重载的只有 `plugins/*/index.js`、`chat.js`、`llm.js` 这类代码；改 `schedules/*.md` 里的提示词不用——定时任务每次触发重新下发。`journal-panel` 同理，把 target 换成 `include:journal-panel`。

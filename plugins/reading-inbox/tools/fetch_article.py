@@ -15,8 +15,11 @@ Output is one JSON object:
 
 import html as htmllib
 import json
+import ipaddress
 import re
+import socket
 import sys
+from urllib.parse import urlparse
 
 import requests
 
@@ -104,9 +107,24 @@ def _get(url: str, ua: str):
     )
 
 
+def _check_url(url: str) -> None:
+    """Only public http(s) pages: a forwarded link must not reach the LAN."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("只支持 http/https 链接")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("链接缺少主机名")
+    for info in socket.getaddrinfo(host, None):
+        addr = ipaddress.ip_address(info[4][0])
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast:
+            raise ValueError("拒绝抓取内网或回环地址")
+
+
 def main(url: str) -> dict:
     response = None
     try:
+        _check_url(url)
         response = _get(url, UA)
         page = response.text
         if any(marker in page for marker in BLOCK_MARKERS):

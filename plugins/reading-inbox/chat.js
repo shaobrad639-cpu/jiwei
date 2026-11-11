@@ -6,6 +6,14 @@ import { extractUrls } from './wechat.js'
 
 const hash = text => createHash('sha256').update(text).digest('hex')
 const bareConfirmation = text => /^(?:对|是|是的|好|好的|确认|确定|可以|嗯|ok|yes)[。！!\s]*$/iu.test(text.trim())
+// 平日只转发链接：正文不进每次分类，只有问到文章内容/周报时才带上。
+const CONTENT_HINT = /(周报|正文|这篇|那篇|文章|概括|总结|提炼|主要内容|讲了什么|写了什么|读一下|读过)/u
+// “点评”两个字就够；“点评我的收藏”这类裸命令直接走点评，不交给模型去猜。
+const REVIEW_COMMAND = /^(?:请)?(?:(?:点评|评价)(?:一下)?(?:我的|这些|那些|这周的)?(?:收藏|收件箱|文章)?|总结一下(?:我的)?(?:收藏|文章)|看看(?:我的)?收藏)[。！!.\s]*$/u
+// 生成之后想直接在微信里看全文：“发送给我”“念一下”“全文”。
+const SEND_COMMAND = /^(?:(?:请)?(?:发送|发|念|来)(?:给我|我|一下|一遍)|(?:看|要)?全文|再看一遍|重发)[。！!.\s]*$/u
+// 存错了要撤销：“取消刚才的保存”“撤销上一条”。
+const UNDO_COMMAND = /^(?:取消|撤销|撤回|删掉|删除)(?:刚才|刚刚|上一条|最后一条|这次的?)?的?(?:保存|附件|图片|文件|记录|收藏)[。！!.\s]*$/u
 
 function historyOf(state) {
   const history = []
@@ -58,8 +66,13 @@ export function chatSnapshot(snapshot) {
     items: selected.map(i => ({ ...Object.fromEntries(['id', 'type', 'status', 'project', 'due', 'at', 'place', 'created', 'updated'].map(k => [k, i[k] ?? null])),
       text: clip(i.text, 200), note: clip(i.note, 300) })),
     notebook: notebook.length > 6000 ? '（仅保留本子末尾）…' + notebook.slice(-6000) : notebook,
+    reading: (snapshot.reading || []).slice(0, 4).map(item => ({
+      id: item.id, title: clip(item.title, 120), status: item.status ?? null, kind: item.kind ?? null,
+      url: item.url ?? null, summary: clip(item.summary, 400),
+      body: clip(item.body, 3200), body_chars: Number(item.body_chars) || 0 })),
     coverage: { omitted_projects: Math.max(0, projects.length - 12), omitted_items: items.length - selected.length,
       notebook_truncated: notebook.length > 6000,
+      reading_truncated: (snapshot.reading || []).some(item => (Number(item.body_chars) || 0) > String(item.body || '').length),
       fields_may_be_truncated: projects.some(p => ['goal', 'state', 'next', 'open'].some(k => (p[k] || '').length > 500)) || selected.some(i => (i.text || '').length > 200 || (i.note || '').length > 300) },
   }
 }
@@ -143,7 +156,7 @@ export class JournalChat {
       const history = historyOf(state)
       const result = await this.llm.chat({ text: text.trim(), history,
         history_omitted_turns: state.turns.length - history.length,
-        journal: chatSnapshot(await this.context()), now: new Date().toISOString(), timezone: 'Asia/Shanghai' })
+        journal: chatSnapshot(await this.context({ reading: true })), now: new Date().toISOString(), timezone: 'Asia/Shanghai' })
       const turn = { id: requestId, text, reply: result.reply, model: result.model, at: new Date().toISOString() }
       state.turns = [...state.turns, turn].slice(-20)
       await this.save(key, state)
@@ -183,7 +196,9 @@ export class JournalChat {
         if (previous.text !== text) throw new Error('消息 id 已用于另一条内容')
         if (previous.capture) {
           try {
-            const result = await handlers.record(previous.capture)
+            const result = previous.merge_targets
+              ? await handlers.merge(previous.capture, previous.merge_targets)
+              : await handlers.record(previous.capture)
             return { ...previous, reply: result.receipt, duplicate: true, recorded: true }
           } catch (error) { throw Object.assign(new Error('未能核对已处理消息'), { code: 'AUTO_CAPTURE_FAILED', cause: error }) }
         }
@@ -193,9 +208,37 @@ export class JournalChat {
           : previous.intent === 'ref' ? '这条消息已处理，未重复收录资料。' : previous.reply, duplicate: true }
       }
       await handlers.mark('auto')
+      if (REVIEW_COMMAND.test(text) && typeof handlers.digest === 'function') {
+        const result = await handlers.digest()
+        await handlers.mark('digest')
+        const turn = { id, text, reply: result.receipt, model: { provider: 'command', model: 'review' },
+          intent: 'digest', recorded: false, at: new Date().toISOString(), delivered: false }
+        state.turns = [...state.turns, turn].slice(-20)
+        state.pending = null
+        await this.save(key, state)
+        return turn
+      }
+      if (SEND_COMMAND.test(text) && typeof handlers.lastDigest === 'function') {
+        const result = await handlers.lastDigest()
+        await handlers.mark('digest')
+        const turn = { id, text, reply: result.receipt, model: { provider: 'command', model: 'send' },
+          intent: 'digest', recorded: false, at: new Date().toISOString(), delivered: false }
+        state.turns = [...state.turns, turn].slice(-20)
+        await this.save(key, state)
+        return turn
+      }
+      if (UNDO_COMMAND.test(text) && typeof handlers.undo === 'function') {
+        const result = await handlers.undo()
+        await handlers.mark('undo')
+        const turn = { id, text, reply: result.receipt, model: { provider: 'command', model: 'undo' },
+          intent: 'cancel', recorded: false, at: new Date().toISOString(), delivered: false }
+        state.turns = [...state.turns, turn].slice(-20)
+        await this.save(key, state)
+        return turn
+      }
       if (state.pending && Date.now() - Date.parse(state.pending.asked_at) > 24 * 3600000) state.pending = null
       const pending = state.pending?.delivered ? state.pending : null
-      const [snapshot, rules] = await Promise.all([this.context(), this.rules()])
+      const [snapshot, rules] = await Promise.all([this.context({ reading: CONTENT_HINT.test(text) }), this.rules()])
       const journal = chatSnapshot(snapshot)
       const history = historyOf(state)
       const urls = [...new Set([...(event.urls || []), ...(pending?.sources.flatMap(s => extractUrls(s.text)) || [])])]
@@ -220,13 +263,32 @@ export class JournalChat {
       if (decision.items.length) await handlers.validate(capture)
       let reply = decision.reply
       let recorded = false
+      let mergeTargets = null
       if (['task', 'idea', 'mixed', 'confirm'].includes(decision.intent)) {
         try {
-          const result = await handlers.record(capture, { collectRefs: decision.collect_refs })
+          // “补进去”这类补充说明：同名未完成条目存在时补进原条目，不新建重复项。
+          const targets = decision.items.map(item => journal.items.find(existing =>
+            existing.type === item.type && existing.status === 'open' && existing.text === item.text &&
+            String(existing.note || '').trim() && item.note.trim()))
+          const merging = targets.length > 0 && targets.every(Boolean) && typeof handlers.merge === 'function'
+          if (merging) mergeTargets = targets.map(existing => existing.id)
+          const result = merging
+            ? await handlers.merge(capture, mergeTargets)
+            : await handlers.record(capture, { collectRefs: decision.collect_refs })
           reply = result.receipt
           recorded = true
           state.pending = null
         } catch (error) { throw Object.assign(new Error('未能确认自动记录结果'), { code: 'AUTO_CAPTURE_FAILED', cause: error }) }
+      } else if (decision.intent === 'query') {
+        await handlers.mark('query')
+      } else if (decision.intent === 'digest') {
+        if (typeof handlers.digest !== 'function') throw Object.assign(new Error('点评通道未启用'), { code: 'AUTO_CAPTURE_FAILED' })
+        try {
+          const result = await handlers.digest()
+          reply = result.receipt
+          state.pending = null
+          await handlers.mark('digest')
+        } catch (error) { throw error && error.code ? error : Object.assign(new Error('未能生成点评'), { code: 'AUTO_CAPTURE_FAILED', cause: error }) }
       } else if (decision.intent === 'clarify') {
         state.pending = { sources, items: decision.items, question: reply, question_turn_id: id,
           asked_at: new Date().toISOString(), delivered: false }
@@ -246,7 +308,8 @@ export class JournalChat {
         await handlers.mark('chat')
       }
       const turn = { id, text, reply, model: decision.model, intent: decision.intent, recorded,
-        at: new Date().toISOString(), delivered: false, ...(recorded ? { capture } : {}) }
+        at: new Date().toISOString(), delivered: false,
+        ...(recorded ? { capture, ...(mergeTargets ? { merge_targets: mergeTargets } : {}) } : {}) }
       state.turns = [...state.turns, turn].slice(-20)
       try { await this.save(key, state) }
       catch (error) {

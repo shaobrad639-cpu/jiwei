@@ -246,6 +246,16 @@ export function apply(ctx, config = {}) {
         if (!id) throw new Error('缺少条目 id')
         return sendJson(res, 200, JSON.parse(await run(['detail', `--id=${id}`])))
       }
+      if (req.method === 'GET' && path === '/journal/api/reading') {
+        const data = await readJson(join(readingDir, 'inbox.json'))
+        const items = (data && Array.isArray(data.items) ? data.items : [])
+          .filter((item) => item.status === 'inbox' || item.status === 'later')
+          .sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')))
+          .slice(0, 6)
+          .map((item) => ({ id: item.id, title: item.title || item.url, url: item.url,
+            status: item.status, hasBody: Boolean(item.body) }))
+        return sendJson(res, 200, { items })
+      }
       if (req.method === 'GET' && path === '/journal/api/heat') {
         const days = Math.max(7, Math.min(370, Number(url.searchParams.get('days')) || 84))
         const raw = await run(['heat', '--days', String(days)])

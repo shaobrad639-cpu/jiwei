@@ -67,6 +67,46 @@ test('Harness routes, visible stream assembly and terminal failure checks', asyn
   llm.stop()
 })
 
+test('classify accepts a ledger query answered directly and rejects a query that carries records', async () => {
+  const llm = new JournalLlm()
+  const input = { text: '我有几个待办报销', history: [], journal: { projects: [], items: [] }, pending: null }
+  llm.runtime = runtime({ intent: 'query', continuation: false, collect_refs: false, reply: '未完成 2 条，都是「报销发票」。', items: [] })
+  const result = await llm.classify(input)
+  assert.equal(result.intent, 'query')
+  assert.equal(result.reply, '未完成 2 条，都是「报销发票」。')
+  llm.runtime = runtime({ intent: 'query', continuation: false, collect_refs: false, reply: '', items: [] })
+  await assert.rejects(llm.classify(input), { code: 'MODEL_RESPONSE_INVALID' })
+  llm.runtime = runtime({ intent: 'query', continuation: false, collect_refs: false, reply: '答',
+    items: [{ type: 'task', text: '报销发票', note: '', quote: '报销发票', project: null, due: null, at: null, place: null, time_quote: null }] })
+  await assert.rejects(llm.classify(input), { code: 'MODEL_RESPONSE_INVALID' })
+})
+
+test('classify accepts a weekly digest request and weeklyDigest validates its own payload', async () => {
+  const llm = new JournalLlm()
+  const input = { text: '出个周报', history: [], pending: null, journal: { projects: [], items: [] } }
+  llm.runtime = runtime({ intent: 'digest', continuation: false, collect_refs: false, reply: '', items: [] })
+  assert.equal((await llm.classify(input)).intent, 'digest')
+  llm.runtime = runtime({ intent: 'chat', continuation: false, collect_refs: false, reply: '好', items: [],
+    digest: { heading: 'h', body: 'b', item_ids: [] } })
+  await assert.rejects(llm.classify(input), { code: 'MODEL_RESPONSE_INVALID' })
+
+  const items = [{ id: 'it_1', title: '访谈纪要', body: '金刚石铜冷板', body_chars: 6, note: '', url: 'https://x', status: 'inbox' }]
+  llm.runtime = runtime({ title: '第 1 期', intro: '这周攒了一篇。',
+    sections: [{ heading: '散热', body: '比纯铜低 3–5℃。', item_ids: ['it_1'] }],
+    top_pick_id: 'it_1', top_pick_reason: '最具体' })
+  const digest = await llm.weeklyDigest({ items, now: '2026-11-11T05:00:00.000Z', timezone: 'Asia/Shanghai' })
+  assert.equal(digest.sections[0].itemIds[0], 'it_1')
+  assert.equal(digest.topPickId, 'it_1')
+  llm.runtime = runtime({ title: '第 1 期', intro: '',
+    sections: [{ heading: '散热', body: 'x', item_ids: ['it_9'] }], top_pick_id: null, top_pick_reason: '' })
+  await assert.rejects(llm.weeklyDigest({ items, now: '', timezone: 'Asia/Shanghai' }), { code: 'MODEL_RESPONSE_INVALID' })
+  llm.runtime = runtime({ title: '第 1 期', intro: '',
+    sections: [{ heading: '散热', body: '长'.repeat(500), item_ids: ['it_1'] }], top_pick_id: null, top_pick_reason: '' })
+  const long = await llm.weeklyDigest({ items, now: '', timezone: 'Asia/Shanghai' })
+  assert.equal(long.sections[0].body.length, 301, '每篇点评要截到 300 字')
+  assert.ok(long.sections[0].body.endsWith('…'))
+})
+
 test('timeout bounds discovery as well as a stalled stream; ambiguous routes fail', async () => {
   const llm = new JournalLlm({ timeoutMs: 20 })
   llm.runtime = { listProviders: () => new Promise(() => {}) }

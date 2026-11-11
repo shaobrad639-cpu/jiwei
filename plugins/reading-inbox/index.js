@@ -5,7 +5,7 @@
  * tools the agent uses to curate them, and serves the small JSON API that the
  * Web UI panel reads.
  */
-import { mkdir, readFile, writeFile, rename, appendFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, appendFile, unlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
@@ -77,6 +77,11 @@ function textBlock(text) {
 
 function pickString(value, max = 2000) {
   return typeof value === 'string' ? value.trim().slice(0, max) : ''
+}
+
+/** YYYY-MM-DD in the user's zone; toISOString would shift early mornings to the previous day. */
+function localDay(date = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
 }
 
 function pickStatus(value) {
@@ -511,6 +516,9 @@ function compactItem(item) {
     kind: item.kind,
     addedAt: item.addedAt,
     source: item.source,
+    hasBody: Boolean(item.body),
+    bodyChars: Number(item.bodyChars) || String(item.body || '').length,
+    bodyError: item.bodyError || '',
   }
 }
 
@@ -539,12 +547,34 @@ export function apply(ctx, config = {}) {
       ? config.journalDir.trim()
       : process.env.JOURNAL_DIR || join(HERE, '..', 'journal')
   llm.journalDir = journalDir
+  // 微信里问“这篇收藏讲了什么”时，模型只有标题会答不了。带上最近几条的正文摘录。
+  const CHAT_BODY_LIMIT = 3000
+  const CHAT_READING_ITEMS = 3
+  const CHAT_BODY_BUDGET = 6000
+  function readingForChat(includeBody = false) {
+    return store.read((data) => {
+      let budget = CHAT_BODY_BUDGET
+      return data.items
+        .filter((item) => item.url && item.status !== 'dropped')
+        .sort((a, b) => String(b.updatedAt || b.addedAt || '').localeCompare(String(a.updatedAt || a.addedAt || '')))
+        .slice(0, CHAT_READING_ITEMS)
+        .map((item) => {
+          const full = String(item.body || '')
+          const take = includeBody ? Math.max(0, Math.min(CHAT_BODY_LIMIT, budget, full.length)) : 0
+          budget -= take
+          return { id: item.id, title: item.title || item.url, status: item.status, kind: item.kind || '',
+            url: item.url, summary: item.summary || '', body: full.slice(0, take), body_chars: full.length }
+        })
+    })
+  }
   const chat = new JournalChat({ dir: journalDir, llm, rules: async () => {
     try { return await readFile(join(journalDir, 'RULES.md'), 'utf8') }
     catch { throw Object.assign(new Error('未能读取账本规则'), { code: 'JOURNAL_CONTEXT_FAILED' }) }
-  }, context: async () => {
-    try { return await journalCommand(['chat-context']) }
-    catch { throw Object.assign(new Error('未能读取账本上下文'), { code: 'JOURNAL_CONTEXT_FAILED' }) }
+  }, context: async ({ reading = false } = {}) => {
+    try {
+      const [snapshot, items] = await Promise.all([journalCommand(['chat-context']), readingForChat(reading)])
+      return { ...snapshot, reading: items }
+    } catch (error) { throw Object.assign(new Error('未能读取账本上下文'), { code: 'JOURNAL_CONTEXT_FAILED', cause: error }) }
   } })
   let triageQueue = Promise.resolve()
   ctx.inject(['llm'], (modelCtx) => {
@@ -595,15 +625,6 @@ export function apply(ctx, config = {}) {
     .read((data) => data.items.filter((item) => needsTitle(item)).slice(0, 10).map((item) => [item.id, item.url]))
     .then((pending) => {
       for (const [id, url] of pending) void enrich(id, url, { retries: 2 })
-    })
-
-  // Items captured before body storage existed still deserve a real summary.
-  void store
-    .read((data) => data.items.filter((item) => item.url && !item.body && item.status !== 'dropped').slice(0, 5).map((item) => [item.id, item.url]))
-    .then(async (pending) => {
-      for (const [id, url] of pending) {
-        await ensureBody(id, url)
-      }
     })
 
   void store
@@ -833,6 +854,10 @@ export function apply(ctx, config = {}) {
         allowChat: chatEnabled,
         validate: ({ ev: ignored, ...plan }) => journalCommand(['triage', '--text', plan.source_messages.map(s => s.text).join('\n'), '--validate-plan'], plan),
         record: (capture, options) => captureClassified(event, capture, options),
+        merge: (capture, targets) => mergeClassified(event, capture, targets),
+        digest: () => buildWeeklyDigest(),
+        lastDigest: () => readLatestDigest(),
+        undo: () => undoLastSave(),
         reference: sources => collectReferences({ ...event, text: sources.map(s => s.text).join('\n'),
           urls: sources.flatMap(s => extractUrls(s.text)) }),
         mark: async route => { event.journal_route = route; await bot.saveEvents() },
@@ -849,6 +874,116 @@ export function apply(ctx, config = {}) {
 
   function eventKey(event) {
     return 'wx_' + createHash('sha256').update(`${event.from}\0${event.id || event.at + '\0' + event.text}`).digest('hex').slice(0, 24)
+  }
+
+  // 手动点评：你点名才跑，把收藏文章的正文取出来写成点评。平日收藏不读正文。
+  const DIGEST_ITEM_LIMIT = 8
+  const DIGEST_BODY_BUDGET = 12000
+  async function buildWeeklyDigest() {
+    const items = await store.read((data) => data.items.filter((item) => item.url && item.status !== 'dropped'))
+    if (!items.length) return { receipt: '收件箱里还没有可点评的链接。' }
+    const picked = [...items]
+      .sort((a, b) => String(b.updatedAt || b.addedAt || '').localeCompare(String(a.updatedAt || a.addedAt || '')))
+      .slice(0, DIGEST_ITEM_LIMIT)
+    // 正文只在收到指令时抓：缺正文的当场补一次，抓不到就留空，点评里如实说明。
+    const missing = picked.filter((item) => !item.body && item.url)
+    if (missing.length) {
+      await Promise.all(missing.map((item) => ensureBody(item.id, item.url).catch(() => false)))
+    }
+    const fresh = await store.read((data) => new Map(data.items.map((entry) => [entry.id, entry])))
+    let budget = DIGEST_BODY_BUDGET
+    const payload = picked.map((item) => fresh.get(item.id)).filter(Boolean).map((item) => {
+      const body = String(item.body || '')
+      const take = Math.max(0, Math.min(body.length, budget))
+      budget -= take
+      return { id: item.id, title: item.title || item.url, url: item.url, status: item.status,
+        note: item.note || '', body: body.slice(0, take), body_chars: body.length }
+    })
+    const draft = await llm.weeklyDigest({ items: payload, now: new Date().toISOString(), timezone: 'Asia/Shanghai' })
+    const today = localDay()
+    await store.mutate((data) => {
+      data.digests = data.digests.filter((entry) => localDay(new Date(entry.createdAt)) !== today)
+    })
+    const digest = await saveDigest({ title: `点评 · ${draft.title}`, intro: draft.intro,
+      sections: draft.sections.map((section) => ({ heading: section.heading, body: section.body, itemIds: section.itemIds })),
+      topPickId: draft.topPickId, topPickReason: draft.topPickReason })
+    return { receipt: `已生成点评：\n\n${digestText(digest)}` }
+  }
+
+  // 微信里看全文：把最近一期原样发出来，不经过模型。
+  function digestText(digest) {
+    const lines = [`《${digest.title}》`]
+    if (digest.intro) lines.push('', digest.intro)
+    for (const section of digest.sections || []) {
+      lines.push('', `· ${section.heading}`)
+      if (section.body) lines.push(section.body)
+    }
+    if (digest.topPickReason) lines.push('', `首选：${digest.topPickReason}`)
+    const text = lines.join('\n')
+    return text.length > 3800 ? `${text.slice(0, 3800)}\n…（已截断，完整内容在周报标签页）` : text
+  }
+
+  async function readLatestDigest() {
+    const digest = await store.read((data) => data.digests[0])
+    if (!digest) return { receipt: '还没有生成过点评，先说一句「点评我的收藏」。' }
+    return { receipt: digestText(digest) }
+  }
+
+  // “取消刚才的保存”：撤销两小时内最后一次落盘（附件或收藏）。
+  const UNDO_WINDOW_MS = 2 * 3600 * 1000
+  async function lastAttachmentRecord() {
+    const file = join(journalDir, 'attachments', 'index.jsonl')
+    if (!existsSync(file)) return null
+    const lines = (await readFile(file, 'utf8')).split('\n').filter((line) => line.trim())
+    if (!lines.length) return null
+    try { return { record: JSON.parse(lines[lines.length - 1]), lines } } catch { return null }
+  }
+
+  async function undoLastSave() {
+    const attachment = await lastAttachmentRecord()
+    const item = await store.read((data) => [...data.items]
+      .sort((a, b) => Date.parse(b.addedAt) - Date.parse(a.addedAt))[0] || null)
+    const attachmentAt = attachment ? Date.parse(attachment.record.at) || 0 : 0
+    const itemAt = item ? Date.parse(item.addedAt) || 0 : 0
+    const cutoff = Date.now() - UNDO_WINDOW_MS
+    const undoAttachment = Boolean(attachment && attachmentAt > cutoff && attachmentAt >= itemAt)
+    const undoItem = Boolean(item && itemAt > cutoff && itemAt > attachmentAt)
+    if (!undoAttachment && !undoItem) return { receipt: '最近两小时内没有可撤销的保存。' }
+
+    if (undoAttachment) {
+      const { record, lines } = attachment
+      const base = join(journalDir, 'attachments')
+      const path = String(record.path || '')
+      if (!path.startsWith(`${base}/`)) return { receipt: '最后一条保存的路径不在附件目录内，未撤销。' }
+      await unlink(path).catch((error) => { if (error.code !== 'ENOENT') throw error })
+      await writeFile(join(journalDir, 'attachments', 'index.jsonl'),
+        lines.slice(0, -1).map((line) => `${line}\n`).join(''), 'utf8')
+      return { receipt: `已撤销：${record.name}（${path.slice(base.length + 1)}），文件已删除。` }
+    }
+    const removed = await store.mutate((data) => {
+      const index = data.items.findIndex((entry) => entry.id === item.id)
+      return index === -1 ? null : data.items.splice(index, 1)[0]
+    })
+    if (!removed) return { receipt: '这条收藏已经不在收件箱里了。' }
+    return { receipt: `已撤销收藏：${removed.title || removed.url}` }
+  }
+
+  // “补进去”：把补充内容追加到已有条目，而不是新建一条同名待办。
+  async function mergeClassified(event, capture, targets) {
+    const lines = []
+    for (const [index, id] of targets.entries()) {
+      const item = capture.items[index]
+      const detail = await journalCommand(['detail', '--id', id])
+      if (!detail?.item || detail.item.id !== id) throw new Error('要补进的条目已不存在')
+      const previous = String(detail.item.note || '').trim()
+      const addition = String(item.note || '').trim()
+      const note = !addition || previous.includes(addition) ? previous : [previous, addition].filter(Boolean).join('\n')
+      await journalCommand(['set', '--id', id, '--note', note, '--expected-revision', String(detail.item.revision ?? '')])
+      lines.push(`已补进待办「${item.text}」${addition ? '：' + addition : ''}`)
+    }
+    event.journal_route = 'merge'
+    await bot.saveEvents()
+    return { receipt: lines.join('\n') }
   }
 
   async function captureClassified(event, capture, { collectRefs = false } = {}) {
@@ -884,7 +1019,17 @@ export function apply(ctx, config = {}) {
 
   async function sendReply(text, event) {
     if (event.from !== bot.credential?.ilink_user_id) throw new Error('微信绑定用户已变化，未发送旧会话内容')
-    return bot.sendText(text)
+    // Long replies (a full 点评) would be rejected as one message; split on lines.
+    const chunks = []
+    let current = ''
+    for (const line of String(text).split('\n')) {
+      if (current && (current.length + line.length + 1) > 1500) { chunks.push(current); current = line }
+      else current = current ? `${current}\n${line}` : line
+    }
+    if (current) chunks.push(current)
+    let result
+    for (const chunk of chunks) result = await bot.sendText(chunk)
+    return result
   }
 
   function captureMessage(event) {
@@ -960,8 +1105,6 @@ export function apply(ctx, config = {}) {
       : Promise.resolve(result.item.title)
     if (input.source === 'wechat' && input.acknowledge !== false) void ackCaptured(titlePromise, result)
     else void titlePromise.catch(error => log(`资料标题更新失败：${error.code || error.name || 'unknown'}`))
-    // The body is what a digest needs, and it is independent of the title.
-    void ensureBody(result.item.id, url).catch(error => log(`正文抓取失败：${error.code || error.name || 'unknown'}`))
     return result
   }
 
@@ -1102,7 +1245,7 @@ export function apply(ctx, config = {}) {
     const byId = new Map(items.map((item) => [item.id, item]))
     const lines = [`# ${digest.title}`, '']
     if (digest.intro) lines.push(`> ${digest.intro}`, '')
-    lines.push(`_${digest.createdAt.slice(0, 10)}_`, '')
+    lines.push(`_${localDay(new Date(digest.createdAt))}_`, '')
     for (const section of digest.sections) {
       lines.push(`## ${section.heading}`, '')
       if (section.body) lines.push(section.body, '')
@@ -1180,7 +1323,7 @@ footer { margin-top:48px; font-size:12px; color:#9a9a9a; }
 </style>
 </head>
 <body><main>
-<div class="meta">碎片阅读周报 · ${digest.createdAt.slice(0, 10)}</div>
+<div class="meta">碎片阅读周报 · ${localDay(new Date(digest.createdAt))}</div>
 <h1>${escapeHtml(digest.title)}</h1>
 ${digest.intro ? `<p class="intro">${escapeHtml(digest.intro)}</p>` : ''}
 ${sections}
@@ -1193,7 +1336,7 @@ ${pick}
   async function writeDigestFiles(digest, items) {
     const dir = join(dataDir, 'digests')
     await mkdir(dir, { recursive: true })
-    const base = `${digest.createdAt.slice(0, 10)}-${slugify(digest.title)}`
+    const base = `${localDay(new Date(digest.createdAt))}-${slugify(digest.title)}`
     const md = join(dir, `${base}.md`)
     const html = join(dir, `${base}.html`)
     await writeFile(md, digestMarkdown(digest, items), 'utf8')
@@ -1291,16 +1434,24 @@ ${pick}
       schema: { type: 'object', additionalProperties: true },
       render(args, value) {
         const counts = value.counts || {}
-        return textBlock(
-          `共 ${value.items.length} 条（待读 ${counts.inbox ?? 0} / 稍后 ${counts.later ?? 0} / 已读 ${counts.read ?? 0} / 已弃 ${counts.dropped ?? 0}）`,
-        )
+        const items = Array.isArray(value.items) ? value.items : []
+        const lines = [`共 ${items.length} 条（待读 ${counts.inbox ?? 0} / 稍后 ${counts.later ?? 0} / 已读 ${counts.read ?? 0} / 已弃 ${counts.dropped ?? 0}）`]
+        for (const item of items) {
+          const flags = [STATUS_LABELS[item.status] || item.status]
+          flags.push(item.hasBody ? `正文 ${item.bodyChars || 0} 字` : item.bodyError ? `未抓到正文：${item.bodyError}` : '无正文')
+          if (item.summary) flags.push(`摘要：${String(item.summary).slice(0, 80)}`)
+          if (item.note) flags.push(`备注：${String(item.note).slice(0, 60)}`)
+          lines.push(`${item.id} · ${item.title || item.url}（${flags.join('；')}）`)
+        }
+        return textBlock(lines.join('\n'))
       },
     },
     async execute(args) {
       const status = pickStatus(args && args.status)
       const limit = Math.max(1, Math.min(200, Number((args && args.limit) || 50) || 50))
       return store.read((data) => {
-        const filtered = status ? data.items.filter((item) => item.status === status) : data.items
+        const filtered = status ? data.items.filter((item) => item.status === status)
+          : data.items.filter((item) => item.status === 'inbox' || item.status === 'later')
         return {
           items: sortItems(filtered).slice(0, limit).map(compactItem),
           counts: countsOf(data.items),
@@ -1321,7 +1472,15 @@ ${pick}
     output: {
       schema: { type: 'object', additionalProperties: true },
       render(args, value) {
-        return textBlock(`${value.item.title}\n${value.item.url}`)
+        const item = value.item || {}
+        const body = String(item.body || '')
+        const lines = [`${item.title}\n${item.url}`]
+        if (body) {
+          lines.push('', body)
+          const total = Number(item.bodyChars) || body.length
+          if (total > body.length) lines.push(`（正文共 ${total} 字，以上是前 ${body.length} 字）`)
+        } else lines.push('', '（这篇只有标题和链接，还没有正文；可先用 reading_refresh 重试抓取）')
+        return textBlock(lines.join('\n'))
       },
     },
     async execute(args) {
@@ -1497,7 +1656,7 @@ ${pick}
       schema: { type: 'object', additionalProperties: true },
       render(args, value) {
         if (!value.digest) return textBlock('还没有周报。')
-        return textBlock(`最近一期：${value.digest.title}`)
+        return textBlock(digestText(value.digest))
       },
     },
     async execute() {
@@ -1585,7 +1744,18 @@ ${pick}
     name: 'reading_journal_context',
     description: '晚间收口或周报必须先调用。读取本子、项目、待答问题、工作区变化和文献快照。证据只表示观察，不等于进展；按 journal/RULES.md 处理并引用来源。若 next_offset 非空，继续分页。',
     parameters: {type:'object',properties:{offset:{type:'integer',minimum:0}},additionalProperties:false},
-    output: {schema:{type:'object',additionalProperties:true},render(args,value){return textBlock(`已读取本页 ${value.evidence?.length || 0} 条待核对来源。${value.next_offset !== null ? '还有来源未返回，请继续分页。' : '已到最后一页。'}`)}},
+    output: {schema:{type:'object',additionalProperties:true},render(args,value){
+      const projects = value.projects || []
+      const items = value.items || []
+      const evidence = value.evidence || []
+      const open = items.filter((item) => item.type === 'task' && item.status === 'open')
+      const lines = [`页内：项目 ${projects.length} · 条目 ${items.length}（未完成 ${open.length}） · 待核对来源 ${value.total ?? evidence.length} 条（本页 ${evidence.length}）`]
+      if (projects.length) lines.push('项目：' + projects.slice(0, 10).map((p) => `${p.id}·${p.name}`).join('、'))
+      if (open.length) lines.push('未完成：' + open.slice(0, 10).map((i) => `${i.id}·${i.text}`).join('、'))
+      for (const row of evidence.slice(0, 10)) lines.push(`来源 ${row.id} · ${row.kind || ''} · ${row.title || row.locator || ''}`)
+      lines.push(value.next_offset === null || value.next_offset === undefined ? '已到最后一页。' : `还有来源未返回，继续分页：offset=${value.next_offset}`)
+      return textBlock(lines.join('\n'))
+    }},
     execute(args){return journalCommand(['context','--offset',String(args?.offset||0)])},
   })
 
@@ -1633,7 +1803,12 @@ ${pick}
     output: {
       schema: { type: 'object', additionalProperties: true },
       render(args, value) {
-        return textBlock(`最近 ${value.events.length} 条微信消息。`)
+        const events = value.events || []
+        const lines = [`最近 ${events.length} 条微信消息：`]
+        for (const event of events) {
+          lines.push(`${event.at || ''} · ${event.journal_route || ''} · ${String(event.text || '').slice(0, 80) || '（无文本）'}`)
+        }
+        return textBlock(lines.join('\n'))
       },
     },
     async execute() {

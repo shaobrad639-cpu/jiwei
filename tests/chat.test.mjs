@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, readdirSync, copyFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync, copyFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -94,6 +94,124 @@ test('model chat returns visible reply JSON and rejects invalid replies', async 
   assert.equal(chatCommand('我们聊聊这个问题'), null)
 })
 
+test('ledger queries answer without writing; a supplement merges into the existing item instead of duplicating it', async t => {
+  const { dir } = fixture(t)
+  const snapshot = { projects: [], notebook: '',
+    items: [{ id: 't_1', type: 'task', status: 'open', text: '报销发票', note: '发票文件：a.pdf' }] }
+  const calls = []
+  const handlers = {
+    mark: async route => { calls.push(['mark', route]) },
+    validate: async () => {},
+    record: async () => { calls.push(['record']); return { receipt: '已加入待办：报销发票。' } },
+    merge: async (_capture, targets) => { calls.push(['merge', targets]); return { receipt: '已补进待办「报销发票」' } },
+  }
+  let decision
+  const llm = { classify: async () => decision }
+  const chat = new JournalChat({ dir, llm, context: async () => snapshot })
+
+  decision = { intent: 'query', continuation: false, collect_refs: false, items: [],
+    reply: '未完成 2 条，都是「报销发票」。', model: { provider: 'p', model: 'm' } }
+  const answer = await chat.route('wx', { text: '现在我有几个待办报销', ev: '1' }, handlers)
+  assert.equal(answer.reply, '未完成 2 条，都是「报销发票」。')
+  assert.equal(answer.intent, 'query')
+  assert.deepEqual(calls, [['mark', 'auto'], ['mark', 'query']])
+
+  calls.length = 0
+  decision = { intent: 'task', continuation: true, collect_refs: false, reply: '',
+    items: [{ type: 'task', text: '报销发票', note: '补充：这笔是打车费（¥15.20）', quote: '打车费',
+      project: null, due: null, at: null, place: null, time_quote: null }], model: { provider: 'p', model: 'm' } }
+  const merged = await chat.route('wx', { text: '补进去，打车费', ev: '2' }, handlers)
+  assert.equal(merged.reply, '已补进待办「报销发票」')
+  assert.deepEqual(calls, [['mark', 'auto'], ['merge', ['t_1']]])
+  const replay = await chat.route('wx', { text: '补进去，打车费', ev: '2' }, handlers)
+  assert.equal(replay.duplicate, true)
+  assert.deepEqual(calls.at(-1), ['merge', ['t_1']])
+})
+
+test('reading snapshot carries collected article bodies and flags ones cut short', () => {
+  const snapshot = chatSnapshot({ projects: [], items: [], notebook: '',
+    reading: [{ id: 'it_1', title: '访谈纪要：AI芯片散热', status: 'inbox', kind: '论文',
+      url: 'https://mp.weixin.qq.com/s/x', summary: '', body: '金刚石铜冷板的技术优势。'.repeat(20), body_chars: 9000 }] })
+  assert.equal(snapshot.reading[0].title, '访谈纪要：AI芯片散热')
+  assert.equal(snapshot.reading[0].status, 'inbox')
+  assert.ok(snapshot.reading[0].body.includes('金刚石铜冷板'))
+  assert.equal(snapshot.reading[0].body_chars, 9000)
+  assert.equal(snapshot.coverage.reading_truncated, true)
+  const whole = chatSnapshot({ projects: [], items: [], notebook: '',
+    reading: [{ id: 'it_2', title: '短文章', body: '全文', body_chars: 2 }] })
+  assert.equal(whole.coverage.reading_truncated, false)
+})
+
+test('article bodies load only for content questions; the weekly digest has its own channel', async t => {
+  const { dir } = fixture(t)
+  const calls = []
+  const snapshot = { projects: [], items: [], notebook: '' }
+  let decision
+  const llm = { classify: async () => decision }
+  const chat = new JournalChat({ dir, llm,
+    context: async (options = {}) => { calls.push(['context', Boolean(options.reading)]); return snapshot } })
+  const handlers = {
+    mark: async route => { calls.push(['mark', route]) },
+    record: async () => { calls.push(['record']); return { receipt: '不应走到这里' } },
+    digest: async () => { calls.push(['digest']); return { receipt: '已生成点评「第 1 期」' } },
+  }
+  decision = { intent: 'chat', continuation: false, collect_refs: false, reply: '早', items: [],
+    model: { provider: 'p', model: 'm' } }
+  await chat.route('wx', { text: '早', ev: 'a' }, handlers)
+  assert.deepEqual(calls, [['mark', 'auto'], ['context', false], ['mark', 'chat']])
+
+  calls.length = 0
+  decision = { intent: 'digest', continuation: false, collect_refs: false, reply: '', items: [],
+    model: { provider: 'p', model: 'm' } }
+  const result = await chat.route('wx', { text: '出个周报', ev: 'b' }, handlers)
+  assert.equal(result.reply, '已生成点评「第 1 期」')
+  assert.deepEqual(calls, [['mark', 'auto'], ['context', true], ['digest'], ['mark', 'digest']])
+
+  calls.length = 0
+  let classified = 0
+  llm.classify = async () => { classified += 1; return decision }
+  const direct = await chat.route('wx', { text: '点评我的收藏', ev: 'c' }, handlers)
+  assert.equal(direct.reply, '已生成点评「第 1 期」')
+  assert.equal(classified, 0, '裸命令不应再问模型')
+  assert.deepEqual(calls, [['mark', 'auto'], ['digest'], ['mark', 'digest']])
+
+  calls.length = 0
+  const bare = await chat.route('wx', { text: '点评', ev: 'c2' }, handlers)
+  assert.ok(bare.reply.length > 0)
+  assert.equal(classified, 0, '只说“点评”也要直接走点评')
+
+  calls.length = 0
+  handlers.lastDigest = async () => { calls.push(['lastDigest']); return { receipt: '《点评 · 第 1 期》\n\n· 散热\n比纯铜低 3–5℃。' } }
+  const sent = await chat.route('wx', { text: '发送给我', ev: 'd' }, handlers)
+  assert.ok(sent.reply.includes('比纯铜低 3–5℃'))
+  assert.deepEqual(calls, [['mark', 'auto'], ['lastDigest'], ['mark', 'digest']])
+
+  calls.length = 0
+  handlers.undo = async () => { calls.push(['undo']); return { receipt: '已撤销：pic.jpg，文件已删除。' } }
+  const undone = await chat.route('wx', { text: '取消刚才的保存', ev: 'e' }, handlers)
+  assert.ok(undone.reply.includes('已撤销'))
+  assert.deepEqual(calls, [['mark', 'auto'], ['undo'], ['mark', 'undo']])
+})
+
+test('async WeChat handler failures are logged instead of becoming unhandled rejections', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'wechat-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const logs = []
+  const bot = new WeChatBot({ dir, log: message => logs.push(message),
+    onMessage: async () => { throw new Error('boom') } })
+  bot.credential = { ilink_user_id: 'u1' }
+  bot.handleMessage({ from_user_id: 'u1', message_id: 'm1', item_list: [{ type: 1, text_item: { text: '早上好' } }] })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(logs.some(line => line.includes('处理微信消息失败')))
+})
+
+test('article fetcher refuses loopback and private addresses', () => {
+  const result = spawnSync(python, [resolve('plugins/reading-inbox/tools/fetch_article.py'), 'http://127.0.0.1:9/secret'], { encoding: 'utf8' })
+  const payload = JSON.parse(result.stdout)
+  assert.match(payload.error, /内网|回环/)
+  assert.equal(payload.body, '')
+})
+
 test('WeChat routes chat, followups, explicit notes and mode changes; ingest excludes conversation', async t => {
   const { dir, journal } = fixture(t)
   let bot
@@ -105,6 +223,7 @@ test('WeChat routes chat, followups, explicit notes and mode changes; ingest exc
   t.after(() => { WeChatBot.prototype.load = originalLoad; WeChatBot.prototype.sendText = originalSend })
   const cleanup = []
   const inputs = []
+  const tools = []
   const ctx = {
     agentDefaultModel: { currentSelection: () => ({ provider: 'configured', model: 'm' }) },
     llm: { listProviders: () => [{ id: 'configured' }, { id: 'unused' }], listModels: async provider => provider === 'configured' ? [{ id: 'm' }] : [], async *stream(options) {
@@ -113,18 +232,38 @@ test('WeChat routes chat, followups, explicit notes and mode changes; ingest exc
       const input = JSON.parse(options.messages[0].content[0].text)
       inputs.push({ purpose: options.purpose, input })
       let output = options.purpose === 'journal-chat' ? { reply: input.history.length ? '接着刚才的实验讨论。' : '可以讨论实验。' }
-        : { items: [{ type: 'task', text: '整理结果', note: '', quote: input.text, project: null, due: null, at: null, place: null, time_quote: null }] }
-      if (options.purpose === 'journal-classify') output = { intent: 'task', continuation: false, collect_refs: false, reply: '', items: output.items }
+        : options.purpose === 'journal-digest'
+          ? { title: '第 1 期 · 这周收藏', intro: '这周攒了一篇。',
+              sections: [{ heading: '金刚石铜冷板', body: '比纯铜低 3–5℃。', item_ids: ['it_1'] }],
+              top_pick_id: 'it_1', top_pick_reason: '最具体' }
+          : { items: [{ type: 'task', text: '整理结果', note: '', quote: input.text, project: null, due: null, at: null, place: null, time_quote: null }] }
+      if (options.purpose === 'journal-classify') output = input.text.includes('周报')
+        ? { intent: 'digest', continuation: false, collect_refs: false, reply: '', items: [] }
+        : { intent: 'task', continuation: false, collect_refs: false, reply: '', items: output.items }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: JSON.stringify(output) } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     } },
     agents: { currentInitiator: () => undefined },
-    tools: { register() { return () => {} } }, webServer: { register() { return () => {} } },
+    tools: { register(definition) { tools.push(definition); return () => {} } }, webServer: { register() { return () => {} } },
     inject(_names, fn) { fn(this) }, on() {},
     effect(fn) { const dispose = fn(); if (typeof dispose === 'function') cleanup.push(dispose) },
   }
   t.after(() => cleanup.reverse().forEach(fn => fn()))
+  mkdirSync(join(dir, 'inbox'), { recursive: true })
+  writeFileSync(join(dir, 'inbox', 'inbox.json'), JSON.stringify({ version: 1, digests: [], reminders: [],
+    items: [{ id: 'it_1', url: 'https://mp.weixin.qq.com/s/x', title: '访谈纪要：AI芯片散热', site: 'mp.weixin.qq.com',
+      note: '收藏。内容放入周报', tags: [], status: 'inbox', summary: '', minutes: null, kind: '', source: 'wechat',
+      addedAt: '2026-11-10T20:00:00.000Z', updatedAt: '2026-11-10T20:00:00.000Z',
+      body: '金刚石铜冷板的技术优势。', bodyChars: 12, bodyAt: '2026-11-10T20:01:00.000Z' }] }))
   apply(ctx, { dataDir: join(dir, 'inbox'), journalDir: dir, python })
+  const readingGet = tools.find(tool => tool.name === 'reading_get')
+  const rendered = readingGet.output.render({ id: 'it_1' },
+    { item: { title: '访谈纪要', url: 'https://x', body: '金刚石铜冷板的技术优势。', bodyChars: 12 } })
+  assert.ok(JSON.stringify(rendered).includes('金刚石铜冷板的技术优势'))
+  const readingList = tools.find(tool => tool.name === 'reading_list')
+  const listText = JSON.stringify(readingList.output.render({}, await readingList.execute({})))
+  assert.ok(listText.includes('it_1'), 'reading_list 必须把条目 id 交给模型')
+  assert.ok(listText.includes('访谈纪要'))
   const receive = (text, id, from = 'owner') => bot.handleMessage({ from_user_id: from, message_id: id,
     item_list: [{ type: 1, text_item: { text } }] })
   await receive('/聊天', 'start')
@@ -152,6 +291,26 @@ test('WeChat routes chat, followups, explicit notes and mode changes; ingest exc
   await receive('/退出聊天', 'stop')
   await receive('整理结果', 'new-note')
   assert.equal(journal(['state']).items.length, 2)
+  await receive('出个周报', 'digest-write')
+  const inbox = JSON.parse(readFileSync(join(dir, 'inbox', 'inbox.json'), 'utf8'))
+  assert.equal(inbox.digests.length, 1)
+  assert.equal(inbox.digests[0].title, '点评 · 第 1 期 · 这周收藏')
+  assert.equal(inbox.digests[0].sections[0].heading, '金刚石铜冷板')
+  assert.ok(sent.at(-1).includes('已生成点评'))
+  assert.equal(journal(['state']).items.length, 2)
+  await receive('发送给我', 'digest-send')
+  assert.ok(sent.at(-1).includes('金刚石铜冷板'))
+  assert.ok(sent.at(-1).includes('比纯铜低 3–5℃'))
+  const attachmentsDir = join(dir, 'attachments', '2026-11')
+  mkdirSync(attachmentsDir, { recursive: true })
+  const picture = join(attachmentsDir, 'pic.jpg')
+  writeFileSync(picture, 'x')
+  writeFileSync(join(dir, 'attachments', 'index.jsonl'),
+    `${JSON.stringify({ at: new Date().toISOString(), kind: 'image', name: 'pic.jpg', bytes: 1, path: picture })}\n`)
+  await receive('取消刚才的保存', 'undo-save')
+  assert.ok(sent.at(-1).includes('已撤销'))
+  assert.equal(existsSync(picture), false)
+  assert.equal(readFileSync(join(dir, 'attachments', 'index.jsonl'), 'utf8'), '')
   const routes = JSON.parse(readFileSync(eventsFile, 'utf8'))
   assert.equal(routes.find(e => e.id === '1').journal_route, 'chat')
   assert.equal(routes.find(e => e.id === 'stranger').journal_route, 'ignored')

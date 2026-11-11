@@ -181,7 +181,7 @@ export class WeChatBot {
     this.eventsWrite = this.eventsWrite.then(async () => {
       await mkdir(this.dir, { recursive: true })
       const tmp = `${this.eventsFile}.tmp`
-      await writeFile(tmp, `${payload}\n`, 'utf8')
+      await writeFile(tmp, `${payload}\n`, { encoding: 'utf8', mode: 0o600 })
       await rename(tmp, this.eventsFile)
     }).catch(() => {})
     return this.eventsWrite
@@ -190,7 +190,7 @@ export class WeChatBot {
   async persist() {
     await mkdir(this.dir, { recursive: true })
     const tmp = `${this.stateFile}.tmp`
-    await writeFile(tmp, `${JSON.stringify(this.credential, null, 2)}\n`, 'utf8')
+    await writeFile(tmp, `${JSON.stringify(this.credential, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
     await rename(tmp, this.stateFile)
   }
 
@@ -337,7 +337,11 @@ export class WeChatBot {
     if (this.events.length > 100) this.events.shift()
     void this.saveEvents()
     try {
-      return this.onMessage(event, msg)
+      const result = this.onMessage(event, msg)
+      if (result && typeof result.then === 'function') {
+        result.then(undefined, (error) => this.log(`处理微信消息失败：${error && error.message}`))
+      }
+      return result
     } catch (error) {
       this.log(`处理微信消息失败：${error && error.message}`)
     }

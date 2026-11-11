@@ -1,10 +1,10 @@
 {
-  "name": "dsh-journal",
+  "name": "jiwei",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "把散在微信、对话和本子里的想法，压实成一份能读的账本。DeepSeek Harness 插件。",
+  "description": "积微 · 把散在微信、对话和本子里的碎片，压实成能读的账本。DeepSeek Harness 插件。",
   "engines": {
     "node": ">=18"
   },
@@ -15,9 +15,18 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/CRYPTOCHROME384/DSH-Wechat-Journal.git"
+    "url": "https://github.com/CRYPTOCHROME384/jiwei.git"
   },
   "bugs": {
-    "url": "https://github.com/CRYPTOCHROME384/DSH-Wechat-Journal/issues"
-  }
+    "url": "https://github.com/CRYPTOCHROME384/jiwei/issues"
+  },
+  "homepage": "https://github.com/CRYPTOCHROME384/jiwei#readme",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "wechat",
+    "journal",
+    "reading",
+    "notes"
+  ]
 }
