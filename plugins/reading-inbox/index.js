@@ -852,7 +852,8 @@ export function apply(ctx, config = {}) {
       }
       const result = await chat.route(key, { ...event, ev }, {
         allowChat: chatEnabled,
-        validate: ({ ev: ignored, ...plan }) => journalCommand(['triage', '--text', plan.source_messages.map(s => s.text).join('\n'), '--validate-plan'], plan),
+        validate: ({ ev: ignored, ...plan }) => journalCommand(['triage', '--text', plan.source_messages.map(s => s.text).join('\n'), '--validate-plan'], plan)
+          .catch((error) => { throw Object.assign(new Error(error.message), { code: 'VALIDATION_FAILED', cause: error }) }),
         record: (capture, options) => captureClassified(event, capture, options),
         merge: (capture, targets) => mergeClassified(event, capture, targets),
         digest: () => buildWeeklyDigest(),

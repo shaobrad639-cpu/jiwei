@@ -81,6 +81,17 @@ test('classify accepts a ledger query answered directly and rejects a query that
   await assert.rejects(llm.classify(input), { code: 'MODEL_RESPONSE_INVALID' })
 })
 
+test('a bare slot word only works for the message day; other dates are still rejected', async t => {
+  const { invoke } = fixture(t)
+  const plan = (date) => ({ items: [{ type: 'task', text: '中午订餐', note: '', quote: '中午订餐', project: null,
+    due: null, at: { date, slot: '中午', clock: null }, place: null, time_quote: '中午' }],
+    model: { provider: 'p', model: 'm' },
+    source_messages: [{ text: '中午订餐', at: '2026-11-11T09:40:00+08:00', ev: 'e1' }] })
+  const args = ['triage', '--text', '中午订餐', '--at', '2026-11-11T09:40:00+08:00', '--ev', 'e1', '--validate-plan']
+  assert.equal(invoke(args, plan('2026-11-11')).status, 0)
+  assert.notEqual(invoke(args, plan('2026-11-10')).status, 0)
+})
+
 test('classify accepts a weekly digest request and weeklyDigest validates its own payload', async () => {
   const llm = new JournalLlm()
   const input = { text: '出个周报', history: [], pending: null, journal: { projects: [], items: [] } }

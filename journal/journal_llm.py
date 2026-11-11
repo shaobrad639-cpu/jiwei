@@ -45,6 +45,14 @@ def validate(plan, raw, projects):
     rows = plan['items']
     if not isinstance(rows, list) or len(rows) > 6:
         raise ValueError('模型最多返回 6 条分诊')
+    day = None
+    for source in (plan.get('source_messages') or []):
+        try:
+            stamp = dt.datetime.fromisoformat(str(source.get('at', '')).replace('Z', '+00:00'))
+            day = stamp.astimezone(dt.timezone(dt.timedelta(hours=8))).date().isoformat()
+            break
+        except ValueError:
+            continue
     valid = []
     ids = {p['id'] for p in projects}
     allowed = {'type', 'text', 'note', 'quote', 'project', 'due', 'at', 'place', 'time_quote'}
@@ -72,8 +80,13 @@ def validate(plan, raw, projects):
                 raise ValueError('模型钟点无效')
         time_quote = text(row['time_quote'], 'time_quote', 1000, optional=True)
         if due or at:
-            if not time_quote or not any(time_quote in source for source in evidence) or not re.search(r'今天|明|后天|周|星期|月|日|号|年|\d', time_quote):
+            if not time_quote or not any(time_quote in source for source in evidence):
                 raise ValueError('模型时间必须有原文依据')
+            if not re.search(r'今天|明|后天|周|星期|月|日|号|年|\d', time_quote):
+                # 「中午订餐」这类只有时段、没有日期的说法，按当天算；日期对不上仍然拒绝。
+                slot_only = bool(at) and bool(at.get('slot')) and bool(re.search(r'早上|上午|中午|下午|傍晚|晚上|夜里|深夜', time_quote)) and at.get('date') == day
+                if not slot_only:
+                    raise ValueError('模型时间必须有原文依据')
         place = text(row['place'], 'place', 200, optional=True)
         if place and not any(place in source for source in evidence):
             raise ValueError('模型地点必须来自原文')
