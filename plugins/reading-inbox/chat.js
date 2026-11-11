@@ -10,6 +10,8 @@ const bareConfirmation = text => /^(?:对|是|是的|好|好的|确认|确定|�
 const CONTENT_HINT = /(周报|正文|这篇|那篇|文章|概括|总结|提炼|主要内容|讲了什么|写了什么|读一下|读过)/u
 // “点评”两个字就够；“点评我的收藏”这类裸命令直接走点评，不交给模型去猜。
 const REVIEW_COMMAND = /^(?:请)?(?:(?:点评|评价)(?:一下)?(?:我的|这些|那些|这周的)?(?:收藏|收件箱|文章)?|总结一下(?:我的)?(?:收藏|文章)|看看(?:我的)?收藏)[。！!.\s]*$/u
+// “面板”：用固定排版把今天讲清楚，不交给模型自由发挥。
+const PANEL_COMMAND = /^(?:面板|看板|今日面板|今日|今天的?安排|今天有(?:什么|啥))[。！!.\s]*$/u
 // 生成之后想直接在微信里看全文：“发送给我”“念一下”“全文”。
 const SEND_COMMAND = /^(?:(?:请)?(?:发送|发|念|来)(?:给我|我|一下|一遍)|(?:看|要)?全文|再看一遍|重发)[。！!.\s]*$/u
 // 存错了要撤销：“取消刚才的保存”“撤销上一条”。
@@ -223,6 +225,15 @@ export class JournalChat {
         await handlers.mark('digest')
         const turn = { id, text, reply: result.receipt, model: { provider: 'command', model: 'send' },
           intent: 'digest', recorded: false, at: new Date().toISOString(), delivered: false }
+        state.turns = [...state.turns, turn].slice(-20)
+        await this.save(key, state)
+        return turn
+      }
+      if (PANEL_COMMAND.test(text) && typeof handlers.panel === 'function') {
+        const result = await handlers.panel()
+        await handlers.mark('panel')
+        const turn = { id, text, reply: result.receipt, model: { provider: 'command', model: 'panel' },
+          intent: 'query', recorded: false, at: new Date().toISOString(), delivered: false }
         state.turns = [...state.turns, turn].slice(-20)
         await this.save(key, state)
         return turn

@@ -887,6 +887,7 @@ export function apply(ctx, config = {}) {
         digest: () => buildWeeklyDigest(),
         lastDigest: () => readLatestDigest(),
         undo: () => undoLastSave(),
+        panel: () => readPanelText(),
         reference: sources => collectReferences({ ...event, text: sources.map(s => s.text).join('\n'),
           urls: sources.flatMap(s => extractUrls(s.text)) }),
         mark: async route => { event.journal_route = route; await bot.saveEvents() },
@@ -956,6 +957,39 @@ export function apply(ctx, config = {}) {
     const digest = await store.read((data) => data.digests[0])
     if (!digest) return { receipt: '还没有生成过点评，先说一句「点评我的收藏」。' }
     return { receipt: digestText(digest) }
+  }
+
+  // “面板”：固定排版，分组 + 计数，像面板那样一眼扫完。
+  async function readPanelText() {
+    const snapshot = await journalCommand(['chat-context'])
+    const tasks = (snapshot.items || []).filter((item) => item.type === 'task' && item.status === 'open')
+    const today = localDay()
+    const clock = (item) => (item.at && (item.at.clock || item.at.slot)) || ''
+    const timed = tasks.filter((item) => item.at && item.at.date)
+      .sort((a, b) => `${a.at.date}${clock(a)}`.localeCompare(`${b.at.date}${clock(b)}`))
+    const todayItems = timed.filter((item) => item.at.date === today)
+    const overdue = timed.filter((item) => item.at.date < today)
+    const untimed = tasks.filter((item) => !(item.at && item.at.date))
+    const reading = await store.read((data) => data.items
+      .filter((item) => item.status === 'inbox' || item.status === 'later')
+      .sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')))
+      .slice(0, 3))
+    const dateLabel = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', weekday: 'short' })
+      .format(new Date())
+    const lines = []
+    const section = (title, rows) => {
+      if (!rows.length) return
+      if (lines.length) lines.push('')
+      lines.push(`【${title}】`)
+      lines.push(...rows)
+    }
+    section(`今天 · ${dateLabel}`, todayItems.map((item) => `${clock(item) || '全天'}　${item.text}`))
+    section(`过期未完成 ${overdue.length}`, overdue.map((item) => `${clock(item) || '全天'}　${item.text}`))
+    section(`待办 ${untimed.length}`, untimed.slice(0, 6).map((item) => `· ${item.text}`))
+    section(`收藏待读 ${reading.length}`, reading.map((item) => `· ${item.title || item.url}`))
+    if (!lines.length) return { receipt: '今天没有安排，待办和收藏也是空的。' }
+    lines.push('', `未完成共 ${tasks.length} 条`)
+    return { receipt: lines.join('\n') }
   }
 
   // “取消刚才的保存”：撤销两小时内最后一次落盘（附件或收藏）。

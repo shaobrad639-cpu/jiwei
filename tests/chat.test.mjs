@@ -181,6 +181,12 @@ test('article bodies load only for content questions; the weekly digest has its 
   assert.equal(classified, 0, '只说“点评”也要直接走点评')
 
   calls.length = 0
+  handlers.panel = async () => { calls.push(['panel']); return { receipt: '【今天 · 11-12 周四】\n09:00　接待客户' } }
+  const panel = await chat.route('wx', { text: '面板', ev: 'p1' }, handlers)
+  assert.ok(panel.reply.includes('【今天'))
+  assert.deepEqual(calls, [['mark', 'auto'], ['panel'], ['mark', 'panel']])
+
+  calls.length = 0
   handlers.lastDigest = async () => { calls.push(['lastDigest']); return { receipt: '《点评 · 第 1 期》\n\n· 散热\n比纯铜低 3–5℃。' } }
   const sent = await chat.route('wx', { text: '发送给我', ev: 'd' }, handlers)
   assert.ok(sent.reply.includes('比纯铜低 3–5℃'))
