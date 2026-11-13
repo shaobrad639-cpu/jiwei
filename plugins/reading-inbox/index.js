@@ -16,6 +16,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { WeChatBot, extractUrls } from './wechat.js'
 import { JournalLlm, triageMessage, chatErrorMessage, modelErrorCode } from './llm.js'
 import { JournalChat, chatCommand } from './chat.js'
+import { sweepAttachments } from './attachments.js'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 
@@ -967,6 +968,35 @@ export function apply(ctx, config = {}) {
     if (!digest) return { receipt: '还没有生成过点评，先说一句「点评我的收藏」。' }
     return { receipt: digestText(digest) }
   }
+
+  // 附件只留一小时；发票例外，长期可查。
+  const ATTACHMENT_SWEEP_MS = 10 * 60 * 1000
+  async function sweepExpiredAttachments() {
+    let removed = []
+    try {
+      ({ removed } = await sweepAttachments(join(journalDir, 'attachments')))
+    } catch (error) {
+      log(`附件清理失败：${error.message}`)
+      return
+    }
+    if (!removed.length) return
+    log(`已清理 ${removed.length} 个超过一小时的附件`)
+    try {
+      // 账本里指向这些文件的条目一并标为已放弃，别留悬空引用。
+      const snapshot = await journalCommand(['chat-context'])
+      for (const record of removed) {
+        const name = String(record.path || '').split('/').pop()
+        if (!name) continue
+        const item = (snapshot.items || []).find((row) => row.type === 'ref' && (row.note || '').includes(name))
+        if (item) await journalCommand(['set', '--id', item.id, '--status', 'dropped']).catch(() => {})
+      }
+    } catch { /* 账本读不到时只清文件 */ }
+  }
+  ctx.effect(() => {
+    void sweepExpiredAttachments()
+    const timer = setInterval(() => { void sweepExpiredAttachments() }, ATTACHMENT_SWEEP_MS)
+    return () => clearInterval(timer)
+  })
 
   // “面板”：固定排版，分组 + 计数，像面板那样一眼扫完。
   async function recentInvoices(limit = 5) {
