@@ -102,11 +102,31 @@ function attachmentOf(item) {
 /** The CDN key arrives as base64 of either 16 raw bytes or a 32-char hex string. */
 function decodeKey(raw) {
   if (!raw || typeof raw !== 'string') return null
-  const buf = Buffer.from(raw, 'base64')
-  if (buf.length === 16) return buf
-  const text = buf.toString('utf8')
+  const text = raw.trim()
+  // 三种来源都见过：32 位十六进制、base64 的 16 字节、base64 的 32 位十六进制。
   if (/^[0-9a-fA-F]{32}$/u.test(text)) return Buffer.from(text, 'hex')
+  const buf = Buffer.from(text.replace(/-/gu, '+').replace(/_/gu, '/'), 'base64')
+  if (buf.length === 16) return buf
+  const inner = buf.toString('utf8')
+  if (/^[0-9a-fA-F]{32}$/u.test(inner)) return Buffer.from(inner, 'hex')
   return null
+}
+
+/** A decrypted file should start with the magic bytes of its kind. */
+function looksDecrypted(bytes, kind) {
+  const head = bytes.subarray(0, 8)
+  if (kind === 'image') {
+    return (head[0] === 0xff && head[1] === 0xd8) // jpeg
+      || head.subarray(0, 4).toString('hex') === '89504e47' // png
+      || head.subarray(0, 3).toString('ascii') === 'GIF'
+      || (head.subarray(0, 4).toString('ascii') === 'RIFF') // webp
+  }
+  if (kind === 'file' || kind === 'voice' || kind === 'video') {
+    return head.subarray(0, 4).toString('ascii') === '%PDF'
+      || head.subarray(0, 2).toString('hex') === '504b' // zip/docx
+      || head[0] === 0xff && head[1] === 0xd8
+  }
+  return true
 }
 
 function decryptEcb(payload, key) {
@@ -364,7 +384,10 @@ export class WeChatBot {
     let bytes = Buffer.from(await res.arrayBuffer())
     const key = decodeKey(attachment.aesKey)
     if (key) bytes = decryptEcb(bytes, key)
-    else if (attachment.kind !== 'image') throw new Error('缺少解密密钥，无法保存该附件')
+    // 没密钥时，图片过去会被原样存成 .jpg，打开是乱码。宁可报错，也不要存坏文件。
+    if (!looksDecrypted(bytes, attachment.kind)) {
+      throw new Error(key ? '解密后不是有效文件' : '缺少解密密钥，无法保存该附件')
+    }
     return bytes
   }
 

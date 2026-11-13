@@ -721,6 +721,15 @@ export function apply(ctx, config = {}) {
     const failed = []
     for (const ref of event.attachmentRefs || []) {
       try {
+        // 密钥形态只记特征，不记内容；图片存坏时靠这几行判断是没密钥还是密钥格式变了。
+        void appendFile(join(dataDir, 'attach-debug.log'), `${JSON.stringify({
+          at: new Date().toISOString(), kind: ref.kind, bytes: ref.bytes,
+          hasKey: Boolean(ref.aesKey), keyLength: String(ref.aesKey || '').length,
+          keyIsHex: /^[0-9a-fA-F]{32}$/u.test(String(ref.aesKey || '')),
+          mediaFields: ref.media ? Object.keys(ref.media) : [],
+          hasFullUrl: Boolean(ref.media && ref.media.full_url),
+          hasQueryParam: Boolean(ref.media && ref.media.encrypt_query_param),
+        })}\n`, 'utf8').catch(() => {})
         const bytes = await bot.download(ref)
         const sha256 = createHash('sha256').update(bytes).digest('hex')
         const name = safeFileName(ref.name, ref.kind)
