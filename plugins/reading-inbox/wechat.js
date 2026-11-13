@@ -136,8 +136,14 @@ function decryptEcb(payload, key) {
 }
 
 // 插件热重载会新建实例；旧实例的监听循环若还活着，同一条消息会被处理两次、
-// 同一张图会被存两份（一份是旧代码的加密原文）。这里保证进程内只留一个监听者。
-let activeListener = null
+// 同一张图会被存两份（一份是旧代码的加密原文）。
+// 用 globalThis 上的注册表而不是模块变量：重载会重新 import 模块，模块级变量
+// 各是一份，跨实例看不见；globalThis 在同一个进程里始终共用。
+const LISTENERS = Symbol.for('dsh.wechat.bot.listeners')
+function listeners() {
+  if (!globalThis[LISTENERS]) globalThis[LISTENERS] = new Set()
+  return globalThis[LISTENERS]
+}
 
 export class WeChatBot {
   constructor({ dir, onMessage, log = () => {} }) {
@@ -288,11 +294,12 @@ export class WeChatBot {
 
   startListening() {
     if (this.listenTask) return
-    if (activeListener && activeListener !== this) {
-      this.log('检测到旧的监听实例，先停掉它')
-      activeListener.stop()
+    for (const other of [...listeners()]) {
+      if (other === this) continue
+      this.log('另一个实例接管微信监听，停掉旧的那个')
+      other.stop()
     }
-    activeListener = this
+    listeners().add(this)
     const controller = new AbortController()
     this.listenAbort = controller
     this.listenTask = this.listen(controller.signal)
@@ -458,7 +465,7 @@ export class WeChatBot {
       this.listenAbort = null
     }
     this.listenTask = null
-    if (activeListener === this) activeListener = null
+    listeners().delete(this)
   }
 }
 
