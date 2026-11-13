@@ -848,6 +848,13 @@ export function apply(ctx, config = {}) {
         await chat.dismiss(key)
         return await captureEvent(event, command.text)
       }
+      if (command?.action === 'send') {
+        event.journal_route = 'send'
+        await bot.saveEvents()
+        const result = await sendSavedFile(command.query)
+        await sendReply(result.receipt, event)
+        return
+      }
       if (command) {
         event.journal_route = 'command'
         await bot.saveEvents()
@@ -967,6 +974,32 @@ export function apply(ctx, config = {}) {
     const digest = await store.read((data) => data.digests[0])
     if (!digest) return { receipt: '还没有生成过点评，先说一句「点评我的收藏」。' }
     return { receipt: digestText(digest) }
+  }
+
+  /** 从附件里挑一份发回微信：有关键词就按名字/商家/日期匹配，没有就发最新的。 */
+  async function sendSavedFile(query = '') {
+    const file = join(journalDir, 'attachments', 'index.jsonl')
+    if (!existsSync(file)) return { receipt: '还没有保存过文件。' }
+    const records = (await readFile(file, 'utf8')).split('\n').filter(Boolean)
+      .map((line) => { try { return JSON.parse(line) } catch { return null } })
+      .filter((row) => row && row.path && existsSync(row.path))
+      .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
+    if (!records.length) return { receipt: '附件都已经过期清掉了，现在没有可发的文件。' }
+    const needle = String(query || '').trim().toLowerCase()
+    let hit = records[0]
+    if (needle) {
+      hit = records.find((row) => [row.name, row.path, row.invoice && row.invoice.seller,
+        row.invoice && row.invoice.date, row.at].filter(Boolean).join(' ').toLowerCase().includes(needle))
+      if (!hit) return { receipt: `没找到包含「${query}」的文件。发「/发」可以取最近一份。` }
+    }
+    const isImage = /\.(?:jpe?g|png|gif|webp)$/iu.test(hit.name || hit.path)
+    try {
+      const sent = await bot.sendFile(hit.path, { fileName: hit.name, asImage: isImage })
+      const size = sent.bytes >= 1024 ? `${Math.round(sent.bytes / 1024)} KB` : `${sent.bytes} B`
+      return { receipt: `已发送：${sent.fileName}（${size}）` }
+    } catch (error) {
+      return { receipt: `发送失败：${error.message}` }
+    }
   }
 
   // 附件只留一小时；发票例外，长期可查。
@@ -1927,6 +1960,32 @@ ${pick}
         catch(error){return {ok:true,sent:true,question_activated:false,error:error.message,warning:'消息已发送，不要重发；请单独重试 question-sent。'}}
       }
       return { ok: true }
+    },
+  })
+
+  tool({
+    name: 'reading_wechat_send',
+    description: '把本机上的一个文件发到用户微信（图片走图片消息，其余走文件消息）。用户说“把这个发我”时用。',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: '本机文件的绝对路径。' } },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(args, value) {
+        const size = value.bytes >= 1024 ? `${Math.round(value.bytes / 1024)} KB` : `${value.bytes} B`
+        return textBlock(`已发送到微信：${value.fileName}（${size}）`)
+      },
+    },
+    async execute(args) {
+      const path = pickString(args && args.path, 500)
+      if (!existsSync(path)) throw new Error(`找不到文件：${path}`)
+      const fileName = path.split(/[\\/]/u).pop()
+      const asImage = /\.(?:jpe?g|png|gif|webp)$/iu.test(fileName)
+      const sent = await bot.sendFile(path, { fileName, asImage })
+      return { ok: true, ...sent }
     },
   })
 

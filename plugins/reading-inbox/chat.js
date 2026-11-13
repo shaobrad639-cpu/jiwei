@@ -48,6 +48,9 @@ export function chatCommand(text) {
   if (/^(?:\/新对话|新对话|清空对话)$/u.test(raw)) return { action: 'reset' }
   const note = /^(?:\/记|\/记账)\s+([\s\S]+)$/u.exec(raw)
   if (note) return { action: 'capture', text: note[1].trim() }
+  // /发 发票  → 把附件里最像「发票」的那份发回微信；不带关键词就是最近一份。
+  const send = /^\/发(?:\s+([\s\S]+))?$/u.exec(raw)
+  if (send) return { action: 'send', query: (send[1] || '').trim() }
   return null
 }
 

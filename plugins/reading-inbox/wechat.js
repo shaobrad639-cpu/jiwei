@@ -9,7 +9,7 @@
  * desktop client is involved.
  */
 import { mkdir, readFile, writeFile, rename, rm, appendFile } from 'node:fs/promises'
-import { createDecipheriv } from 'node:crypto'
+import { createDecipheriv, createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
 const BASE = 'https://ilinkai.weixin.qq.com'
@@ -143,6 +143,17 @@ const LISTENERS = Symbol.for('dsh.wechat.bot.listeners')
 function listeners() {
   if (!globalThis[LISTENERS]) globalThis[LISTENERS] = new Set()
   return globalThis[LISTENERS]
+}
+
+/** PKCS#7 补位后的密文长度。 */
+function aesEcbPaddedSize(size) {
+  return Math.floor(size / 16) * 16 + 16
+}
+
+function encryptEcb(payload, key) {
+  const cipher = createCipheriv('aes-128-ecb', key, null)
+  cipher.setAutoPadding(true)
+  return Buffer.concat([cipher.update(payload), cipher.final()])
 }
 
 export class WeChatBot {
@@ -434,6 +445,76 @@ export class WeChatBot {
     void appendFile(join(this.dir, 'send.log'), `${new Date().toISOString()}\t${String(text).slice(0, 60).replace(/\n/gu, ' ')}\n`, 'utf8')
       .catch(() => {})
     return result
+  }
+
+  /**
+   * 把本地文件发到微信：先取上传地址、AES 加密后 POST 到 CDN，
+   * 再用 sendMessage 发一条 file_item / image_item。
+   * 图片走 image_item（微信里直接预览），其余走 file_item。
+   */
+  async sendFile(filePath, { fileName, asImage = false } = {}) {
+    if (!this.credential || !this.credential.bot_token) throw new Error('微信未连接')
+    const to = this.credential.ilink_user_id
+    if (!to) throw new Error('缺少微信用户 id，请重新扫码接入')
+    const bytes = await readFile(filePath)
+    const rawsize = bytes.length
+    const rawfilemd5 = createHash('md5').update(bytes).digest('hex')
+    const filesize = aesEcbPaddedSize(rawsize)
+    const filekey = randomBytes(16).toString('hex')
+    const aeskey = randomBytes(16)
+
+    const upload = await postJson('/ilink/bot/getuploadurl', {
+      filekey,
+      media_type: asImage ? 1 : 3,
+      to_user_id: to,
+      rawsize,
+      rawfilemd5,
+      filesize,
+      no_need_thumb: true,
+      aeskey: aeskey.toString('hex'),
+      base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSH' },
+    }, { token: this.credential.bot_token, timeoutMs: 30000 })
+
+    const fullUrl = String(upload.upload_full_url || '').trim()
+    const uploadParam = upload.upload_param
+    if (!fullUrl && !uploadParam) throw new Error('微信没有返回上传地址')
+    const target = fullUrl || `${CDN_BASE}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`
+
+    const ciphertext = encryptEcb(bytes, aeskey)
+    const res = await fetch(target, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: new Uint8Array(ciphertext),
+      signal: timeoutSignal(120000),
+    })
+    if (res.status !== 200) throw new Error(`上传失败：HTTP ${res.status}`)
+    const downloadParam = res.headers.get('x-encrypted-param')
+    if (!downloadParam) throw new Error('上传成功但没有拿到下载参数')
+
+    const media = {
+      encrypt_query_param: downloadParam,
+      aes_key: Buffer.from(aeskey.toString('hex'), 'utf8').toString('base64'),
+      encrypt_type: 1,
+    }
+    const item = asImage
+      ? { type: 2, image_item: { media, mid_size: filesize } }
+      : { type: 4, file_item: { media, file_name: fileName || filePath.split(/[\\/]/u).pop(), len: String(rawsize) } }
+    const result = await postJson('/ilink/bot/sendmessage', {
+      msg: {
+        from_user_id: '',
+        to_user_id: to,
+        client_id: `dsh-${randomUUID().slice(0, 12)}`,
+        message_type: 2,
+        message_state: 2,
+        ...(this.contextTokens.get(to) ? { context_token: this.contextTokens.get(to) } : {}),
+        item_list: [item],
+      },
+      base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSH' },
+    }, { token: this.credential.bot_token, timeoutMs: 60000 })
+    if ((result.ret !== undefined && result.ret !== 0) || (result.errcode !== undefined && result.errcode !== 0)) {
+      throw Object.assign(new Error('微信未接受这条文件消息'), { code: 'WECHAT_SEND_FAILED' })
+    }
+    return { bytes: rawsize, fileName: item.file_item ? item.file_item.file_name : '图片', asImage }
   }
 
   async clearCredential() {

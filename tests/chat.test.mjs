@@ -87,6 +87,9 @@ test('model chat returns visible reply JSON and rejects invalid replies', async 
   output = { reply: '已完成', action: 'delete' }
   await assert.rejects(llm.chat({ text: '你好' }), /格式/)
   assert.deepEqual(chatCommand('/记 明天整理结果'), { action: 'capture', text: '明天整理结果' })
+  assert.deepEqual(chatCommand('/发 发票'), { action: 'send', query: '发票' })
+  assert.deepEqual(chatCommand('/发'), { action: 'send', query: '' })
+  assert.equal(chatCommand('/发文件'), null)
   assert.deepEqual(chatCommand('/聊天'), { action: 'start' })
   assert.deepEqual(chatCommand('/退出'), { action: 'stop' })
   assert.deepEqual(chatCommand('/退出聊天'), { action: 'stop' })
