@@ -135,6 +135,10 @@ function decryptEcb(payload, key) {
   return Buffer.concat([decipher.update(payload), decipher.final()])
 }
 
+// 插件热重载会新建实例；旧实例的监听循环若还活着，同一条消息会被处理两次、
+// 同一张图会被存两份（一份是旧代码的加密原文）。这里保证进程内只留一个监听者。
+let activeListener = null
+
 export class WeChatBot {
   constructor({ dir, onMessage, log = () => {} }) {
     this.dir = dir
@@ -284,6 +288,11 @@ export class WeChatBot {
 
   startListening() {
     if (this.listenTask) return
+    if (activeListener && activeListener !== this) {
+      this.log('检测到旧的监听实例，先停掉它')
+      activeListener.stop()
+    }
+    activeListener = this
     const controller = new AbortController()
     this.listenAbort = controller
     this.listenTask = this.listen(controller.signal)
@@ -449,6 +458,7 @@ export class WeChatBot {
       this.listenAbort = null
     }
     this.listenTask = null
+    if (activeListener === this) activeListener = null
   }
 }
 
