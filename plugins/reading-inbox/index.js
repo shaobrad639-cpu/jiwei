@@ -976,6 +976,30 @@ export function apply(ctx, config = {}) {
     return { receipt: digestText(digest) }
   }
 
+  /** 发送时用的文件名：发票写成「商家 · 金额 · 日期」，其余去掉哈希前缀。 */
+  function sendName(record, path) {
+    const clean = (text) => String(text || '').replace(/[\\/:*?"<>|\u0000-\u001f]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 80)
+    const raw = record && record.name ? record.name : String(path || '').split(/[\\/]/u).pop()
+    const invoice = record && record.invoice
+    if (invoice) {
+      const parts = [clean(invoice.seller) || '发票', invoice.amount ? `¥${invoice.amount}` : '',
+        String(invoice.date || '').replace(/^20\d\d年/u, '')].filter(Boolean)
+      return `${clean(parts.join(' · '))}.pdf`
+    }
+    return clean(String(raw).replace(/^[0-9a-f]{8}-/u, '')) || 'file'
+  }
+
+  async function sendNameForPath(path) {
+    try {
+      const file = join(journalDir, 'attachments', 'index.jsonl')
+      if (!existsSync(file)) return sendName(null, path)
+      const rows = (await readFile(file, 'utf8')).split('\n').filter(Boolean)
+        .map((line) => { try { return JSON.parse(line) } catch { return null } })
+        .filter(Boolean)
+      return sendName(rows.find((row) => row.path === path) || null, path)
+    } catch { return sendName(null, path) }
+  }
+
   /** 从附件里挑一份发回微信：有关键词就按名字/商家/日期匹配，没有就发最新的。 */
   async function sendSavedFile(query = '') {
     const file = join(journalDir, 'attachments', 'index.jsonl')
@@ -994,7 +1018,7 @@ export function apply(ctx, config = {}) {
     }
     const isImage = /\.(?:jpe?g|png|gif|webp)$/iu.test(hit.name || hit.path)
     try {
-      const sent = await bot.sendFile(hit.path, { fileName: hit.name, asImage: isImage })
+      const sent = await bot.sendFile(hit.path, { fileName: sendName(hit, hit.path), asImage: isImage })
       const size = sent.bytes >= 1024 ? `${Math.round(sent.bytes / 1024)} KB` : `${sent.bytes} B`
       return { receipt: `已发送：${sent.fileName}（${size}）` }
     } catch (error) {
@@ -1982,9 +2006,9 @@ ${pick}
     async execute(args) {
       const path = pickString(args && args.path, 500)
       if (!existsSync(path)) throw new Error(`找不到文件：${path}`)
-      const fileName = path.split(/[\\/]/u).pop()
-      const asImage = /\.(?:jpe?g|png|gif|webp)$/iu.test(fileName)
-      const sent = await bot.sendFile(path, { fileName, asImage })
+      const name = path.split(/[\\/]/u).pop()
+      const asImage = /\.(?:jpe?g|png|gif|webp)$/iu.test(name)
+      const sent = await bot.sendFile(path, { fileName: await sendNameForPath(path), asImage })
       return { ok: true, ...sent }
     },
   })
