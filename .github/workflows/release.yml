@@ -14,8 +14,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Build release notes from commits
+      - name: Pick release notes
         run: |
+          # 优先用 release-notes/<tag>.md 里手写的说明（讲功能，不讲 commit）；
+          # 没有就按提交自动生成，保证不会空着。
           prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           {
             echo "## 变更"
@@ -25,12 +27,17 @@ jobs:
             else
               git log --no-merges --pretty=format:'- %s（%h）' "$GITHUB_REF_NAME"
             fi
-            echo
             if [ -n "$prev" ]; then
+              echo
               echo
               echo "完整对比：https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
             fi
           } > notes.md
+          curated="release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$curated" ]; then
+            cp "$curated" notes.md
+            echo "使用手写说明：$curated"
+          fi
           cat notes.md
       - name: Create GitHub Release
         env:
