@@ -1041,9 +1041,9 @@ export function apply(ctx, config = {}) {
       .format(new Date())
     const lines = [`今天 ${label}`]
     for (const item of timed) lines.push(`${clock(item) || '全天'}　${item.text}`)
-    if (!timed.length && !untimed.length) lines.push('没有安排。')
-    if (untimed.length) lines.push('', `待办：${untimed.slice(0, 3).map((item) => item.text).join('、')}`)
-    if (unread) lines.push(`收藏待读 ${unread} 条`)
+    // 早间只做提醒：有时间的事说清楚，没时间的待办不在这里罗列。
+    if (!timed.length) lines.push('今天没有安排。')
+    if (unread) lines.push('', `收藏待读 ${unread} 条`)
     return lines.join('\n')
   }
 
