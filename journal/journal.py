@@ -678,6 +678,13 @@ def receipt_description(item: dict, project_name: str | None = None) -> str:
     return body + ('（' + '；'.join(details) + '）' if details else '')
 
 
+def default_at(at: dict | None) -> dict | None:
+    """没指定日期的事项一律按当天记；说了日期或钟点的保持原样。"""
+    if at:
+        return at
+    return {"date": iso()[:10], "slot": None, "clock": None}
+
+
 def build_receipt(item: dict, project_name: str | None, clash: dict | None = None, duplicate: bool = False) -> str:
     kind = item['type']
     if duplicate:
@@ -1054,7 +1061,8 @@ def cmd_triage(args) -> None:
                 'text': proposal['text'], 'note': proposal['note'],
                 'project': proposal['project'], 'status': 'open' if kind == 'task' else 'new',
                 'due': proposal['due'], 'due_raw': proposal['time_quote'] if proposal['due'] else None,
-                'at': proposal['at'], 'at_raw': proposal['time_quote'] if proposal['at'] else None,
+                'at': default_at(proposal['at']) if kind == 'task' else proposal['at'],
+                'at_raw': (proposal['time_quote'] if proposal['at'] else '今天') if kind == 'task' else None,
                 'place': proposal['place'], 'created': stamp, 'updated': stamp,
                 'source': 'wechat', 'ev': ev, 'ev_part': index, 'llm': model,
                 'quote': proposal['quote'],
@@ -1185,8 +1193,8 @@ def cmd_add(args) -> None:
         "status": "open" if args.type == "task" else "new",
         "due": parse_due(args.due),
         "due_raw": args.due if args.due else None,
-        "at": parse_at(args.at),
-        "at_raw": args.at if args.at else None,
+        "at": parse_at(args.at) or (default_at(None) if args.type == "task" else None),
+        "at_raw": args.at if args.at else ("今天" if args.type == "task" else None),
         "place": (args.place or "").strip() or None,
         "note": (args.note or "").strip() or None,
         "created": iso(),
@@ -1225,6 +1233,27 @@ def cmd_promote(args) -> None:
     save(data)
     render(data)
     print(json.dumps({"ok": True, "id": task["id"]}))
+
+
+def cmd_prune(args) -> None:
+    """删掉超过 N 天的提醒记录。项目关联和报销发票类的保留。"""
+    data = load()
+    days = max(1, int(args.days))
+    cutoff = (day() - dt.timedelta(days=days)).isoformat()
+    keep, removed = [], []
+    for item in data["items"]:
+        at = item.get("at") or {}
+        stamp = at.get("date") or (item.get("created") or "")[:10]
+        protected = bool(item.get("project")) or bool(re.search(r"报销|发票", item.get("text") or ""))
+        if item.get("type") == "task" and not protected and stamp and stamp < cutoff:
+            removed.append({"id": item["id"], "text": item["text"], "at": stamp})
+            continue
+        keep.append(item)
+    if removed:
+        data["items"] = keep
+        save(data)
+        render(data)
+    print(json.dumps({"count": len(removed), "removed": removed}, ensure_ascii=False))
 
 
 def cmd_list(args) -> None:
@@ -1963,6 +1992,10 @@ def main() -> None:
     p.add_argument("--project")
     p.add_argument("--ev")
     p.set_defaults(fn=cmd_set)
+
+    p = sub.add_parser("prune")
+    p.add_argument("--days", type=int, default=7)
+    p.set_defaults(fn=cmd_prune)
 
     p = sub.add_parser("detail")
     p.add_argument("--id", required=True)

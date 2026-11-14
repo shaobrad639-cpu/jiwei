@@ -1032,17 +1032,23 @@ export function apply(ctx, config = {}) {
     const snapshot = await journalCommand(['chat-context'])
     const tasks = (snapshot.items || []).filter((item) => item.type === 'task' && item.status === 'open')
     const today = localDay()
+    const yesterday = localDay(new Date(Date.parse(`${today}T00:00:00+08:00`) - 86400000))
     const clock = (item) => (item.at && (item.at.clock || item.at.slot)) || ''
-    const timed = tasks.filter((item) => item.at && item.at.date && item.at.date <= today)
+    const timed = tasks.filter((item) => item.at && item.at.date)
       .sort((a, b) => `${a.at.date}${clock(a)}`.localeCompare(`${b.at.date}${clock(b)}`))
-    const untimed = tasks.filter((item) => !(item.at && item.at.date))
+    const todayItems = timed.filter((item) => item.at.date === today)
+    const yesterdayItems = timed.filter((item) => item.at.date === yesterday)
     const unread = await store.read((data) => data.items.filter((item) => item.status === 'inbox').length)
     const label = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', weekday: 'short' })
       .format(new Date())
     const lines = [`今天 ${label}`]
-    for (const item of timed) lines.push(`${clock(item) || '全天'}　${item.text}`)
-    // 早间只做提醒：有时间的事说清楚，没时间的待办不在这里罗列。
-    if (!timed.length) lines.push('今天没有安排。')
+    for (const item of todayItems) lines.push(`${clock(item) || '全天'}　${item.text}`)
+    if (!todayItems.length) lines.push('今天没有安排。')
+    // 昨天的事项只在这里回顾一次，之后不再提醒。
+    if (yesterdayItems.length) {
+      lines.push('', '昨天回顾')
+      for (const item of yesterdayItems) lines.push(`${clock(item) || '全天'}　${item.text}`)
+    }
     if (unread) lines.push('', `收藏待读 ${unread} 条`)
     return lines.join('\n')
   }
@@ -1068,6 +1074,11 @@ export function apply(ctx, config = {}) {
       await bot.sendText(text)
       await markMorningSent(day)
       log('早间提要已发送')
+      // 提醒只留一周：每天发完提要顺手清一次。
+      try {
+        const pruned = await journalCommand(['prune', '--days', '7'])
+        if (pruned && pruned.count) log(`已删除 ${pruned.count} 条超过一周的提醒`)
+      } catch (error) { log(`清理旧提醒失败：${error.message}`) }
     } catch (error) {
       morningSentFor = ''
       log(`早间提要发送失败：${error.message}`)
