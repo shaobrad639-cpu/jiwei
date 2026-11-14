@@ -1328,7 +1328,6 @@ window.__ModuleLoader__.load({
         block('今天', today.length, today.map((item) => row(item, true)), '今天没有安排。'),
         earlier.length ? block('昨天回顾', earlier.length, earlier.slice(-6).map((item) => row(item, true,
           item.at.date === yesterday ? '' : shortDay(item.at.date))), '') : null,
-        block('待办', untimed.length, untimed.slice(0, 8).map((item) => row(item, false)), '没有待办。'),
         block('报销', reimburse.length + (invoices || []).length, money, '还没有发票。'),
         block('未读收藏', reading.length, reading.map((item) => h('div', { key: item.id, className: 'jp-today-row' },
           h('span', { className: 'jp-today-time' }, item.status === 'later' ? '稍后' : '待读'),

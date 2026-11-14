@@ -165,7 +165,7 @@ test('semantic triage persists exact raw evidence, provenance, dates and stays i
   }))
   const result = await triageMessage(event, journal, llm, async () => 'rules', assert.fail)
   assert.equal(result.engine, 'llm')
-  assert.match(result.receipt, /^已加入待办：/)
+  assert.match(result.receipt, /^已记下：/)
   assert.match(result.receipt, /会议室/)
   const state = await journal(['state'])
   assert.equal(state.items.length, 1)

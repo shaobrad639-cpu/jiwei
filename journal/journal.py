@@ -574,13 +574,13 @@ def split_clauses(text: str) -> list[str]:
 
 def build_multi_receipt(items: list[dict], data: dict, duplicate: bool = False) -> str:
     if not items:
-        return '原文已保存，未新增待办或想法。'
+        return '原文已保存，没有新增记录。'
     if duplicate:
         head = '这条消息已处理，未重复添加：'
     else:
         tasks = sum(i['type'] == 'task' for i in items)
         ideas = sum(i['type'] == 'idea' for i in items)
-        results = ([f'已加入 {tasks} 条待办'] if tasks else []) + ([f'已保存 {ideas} 条想法'] if ideas else [])
+        results = ([f'已记下 {tasks} 条'] if tasks else []) + ([f'已保存 {ideas} 条想法'] if ideas else [])
         head = '，'.join(results) + '：'
     lines = [head]
     for item in items:
@@ -683,12 +683,12 @@ def build_receipt(item: dict, project_name: str | None, clash: dict | None = Non
     if duplicate:
         state = item.get('status')
         if kind == 'task':
-            prefix = {'done': '该任务已完成', 'parked': '该待办已暂缓', 'dropped': '该待办已放弃'}.get(state, '这条待办已存在')
+            prefix = {'done': '该任务已完成', 'parked': '这条已暂缓', 'dropped': '这条已放弃'}.get(state, '这条已存在')
         else:
             prefix = {'promoted': '该想法已标记为已转任务', 'parked': '该想法已暂缓', 'dropped': '该想法已放弃'}.get(state, '这条想法已保存')
         prefix += '，未重复添加'
     else:
-        prefix = '已加入待办' if kind == 'task' else '已保存想法'
+        prefix = '已记下' if kind == 'task' else '已保存想法'
     receipt = prefix + '：' + receipt_description(item, project_name) + '。'
     if clash:
         receipt += '\n同一天还有记录：' + receipt_description(clash) + '。'
@@ -1073,7 +1073,7 @@ def cmd_triage(args) -> None:
         elif created:
             receipt = build_multi_receipt(created, data)
         elif not urls:
-            receipt = '原文已保存，未新增待办或想法。'
+            receipt = '原文已保存，没有新增记录。'
         reply.update(created=created[0]['id'] if created else None, ids=[i['id'] for i in created],
                      receipt=receipt, engine='llm', model=model)
         data.setdefault('llm_triage', {})[ev] = reply
@@ -1478,7 +1478,7 @@ def render(data: dict | None = None) -> None:
 
     loose = [t for t in tasks if not t.get("project") and t["status"] in ("open", "parked")]
     if loose:
-        lines.append("## 未关联项目的待办")
+        lines.append("## 记录")
         for t in sorted(loose, key=lambda x: (when_key(x), x["created"])):
             when = when_label(t)
             lines.append(f"- {t['text']}" + (f" — {when}" if when else ""))
@@ -1499,8 +1499,9 @@ def render(data: dict | None = None) -> None:
     dropped = [i for i in items if i["status"] == "dropped"]
     counts = inbox_counts()
     lines.append("## 数")
+    timed = [t for t in tasks if t["status"] == "open" and t.get("at")]
     lines.append(
-        f"任务 {len([t for t in tasks if t['status'] == 'open'])} 未完成 · {len(done)} 完成 · "
+        f"记录 {len(tasks)} 条 · 带时间 {len(timed)} 条 · "
         f"想法 {len([i for i in ideas if i['status'] in ('new', 'parked')])} 条 · "
         f"已丢 {len(dropped)} · 碎片阅读待读 {counts['inbox'] + counts['later']}"
     )

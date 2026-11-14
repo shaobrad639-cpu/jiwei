@@ -1152,7 +1152,7 @@ export function apply(ctx, config = {}) {
     section(`昨天回顾 ${earlier.length}`, earlier.slice(-6).map((item) => item.at.date === yesterday
       ? `${clock(item) || '全天'}　${item.text}`
       : `${shortDate(item.at.date)} ${clock(item)}　${item.text}`))
-    section(`待办 ${untimed.length}`, untimed.slice(0, 6).map((item) => `· ${item.text}`))
+    section(`记录 ${untimed.length}`, untimed.slice(0, 6).map((item) => `· ${item.text}`))
     section(`报销 ${reimburse.length + invoices.length}`, [
       ...reimburse.slice(0, 4).map((item) => `· ${item.text}（待办）`),
       ...invoices.map((row) => `· ${row.invoice.seller || row.name}　¥${row.invoice.amount || '—'}　${shortDate(row.invoice.date)}`),
