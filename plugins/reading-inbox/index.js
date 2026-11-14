@@ -1026,6 +1026,48 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  // 早间提要：插件自己发，不依赖模型；08:00–09:59 之间只发一次。
+  let morningSentFor = ''
+  async function buildMorningBrief() {
+    const snapshot = await journalCommand(['chat-context'])
+    const tasks = (snapshot.items || []).filter((item) => item.type === 'task' && item.status === 'open')
+    const today = localDay()
+    const clock = (item) => (item.at && (item.at.clock || item.at.slot)) || ''
+    const timed = tasks.filter((item) => item.at && item.at.date && item.at.date <= today)
+      .sort((a, b) => `${a.at.date}${clock(a)}`.localeCompare(`${b.at.date}${clock(b)}`))
+    const untimed = tasks.filter((item) => !(item.at && item.at.date))
+    const unread = await store.read((data) => data.items.filter((item) => item.status === 'inbox').length)
+    const label = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', weekday: 'short' })
+      .format(new Date())
+    const lines = [`今天 ${label}`]
+    for (const item of timed) lines.push(`${clock(item) || '全天'}　${item.text}`)
+    if (!timed.length && !untimed.length) lines.push('没有安排。')
+    if (untimed.length) lines.push('', `待办：${untimed.slice(0, 3).map((item) => item.text).join('、')}`)
+    if (unread) lines.push(`收藏待读 ${unread} 条`)
+    return lines.join('\n')
+  }
+
+  async function maybeSendMorningBrief() {
+    const now = new Date()
+    const day = localDay(now)
+    const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }).format(now))
+    if (hour < 8 || hour > 9 || morningSentFor === day) return
+    morningSentFor = day
+    try {
+      const text = await buildMorningBrief()
+      await bot.sendText(text)
+      log('早间提要已发送')
+    } catch (error) {
+      morningSentFor = ''
+      log(`早间提要发送失败：${error.message}`)
+    }
+  }
+  ctx.effect(() => {
+    void maybeSendMorningBrief()
+    const timer = setInterval(() => { void maybeSendMorningBrief() }, 60 * 1000)
+    return () => clearInterval(timer)
+  })
+
   // 附件只留一小时；发票例外，长期可查。
   const ATTACHMENT_SWEEP_MS = 10 * 60 * 1000
   async function sweepExpiredAttachments() {
