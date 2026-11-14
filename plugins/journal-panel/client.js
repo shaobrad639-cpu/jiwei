@@ -1095,7 +1095,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', className: 'jp-act', disabled: saving,
               onClick: () => setForm(current => ({ ...current, atDate: '', atClock: '', atSlot: '' })) }, '清除发生时间'),
             h('p', { className: 'jp-hint' }, '日期与时间按北京时间保存。截止日期可清空；只知道发生日期时，不必补具体钟点。',
-              form.type === 'idea' ? '想法的关联时间会保留，但不计入待办和近期发生事项。' : ''),
+              form.type === 'idea' ? '想法的关联时间会保留，但不计入记录和近期发生事项。' : ''),
             label('地点（可留空）', input('place', 'text', '地点')),
             h('dl', { className: 'jp-detail-meta' },
               h('dt', null, '条目 ID'), h('dd', null, item.id),
