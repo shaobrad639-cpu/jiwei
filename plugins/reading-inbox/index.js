@@ -1047,15 +1047,26 @@ export function apply(ctx, config = {}) {
     return lines.join('\n')
   }
 
+  const MORNING_STATE = join(dataDir, 'morning.json')
+  async function morningSentToday(day) {
+    try { return JSON.parse(await readFile(MORNING_STATE, 'utf8')).day === day } catch { return false }
+  }
+  async function markMorningSent(day) {
+    await writeFile(MORNING_STATE, JSON.stringify({ day, at: new Date().toISOString() }), 'utf8').catch(() => {})
+  }
+
   async function maybeSendMorningBrief() {
     const now = new Date()
     const day = localDay(now)
     const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }).format(now))
     if (hour < 8 || hour > 9 || morningSentFor === day) return
+    // 插件重载会把内存状态清掉；以文件为准，避免重载后又发一遍。
+    if (await morningSentToday(day)) { morningSentFor = day; return }
     morningSentFor = day
     try {
       const text = await buildMorningBrief()
       await bot.sendText(text)
+      await markMorningSent(day)
       log('早间提要已发送')
     } catch (error) {
       morningSentFor = ''
