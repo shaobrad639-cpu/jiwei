@@ -1013,7 +1013,7 @@ def cmd_triage(args) -> None:
                     stamp = iso()
                     item.setdefault('history',[]).append({'at':stamp,'field':'status','from':item['status'],'to':choice['status'],'answer_ev':ev})
                     item.update(status=choice['status'],updated=stamp)
-                    label = {'open':'待办','done':'已完成','parked':'已暂缓','dropped':'已放弃','new':'已保存','promoted':'已转为任务'}[choice['status']]
+                    label = {'open':'记录','done':'已完成','parked':'已暂缓','dropped':'已放弃','new':'已保存','promoted':'已转为任务'}[choice['status']]
                     receipt = f'已更新状态：「{item["text"]}」→ {label}。'
                     target['applied'] = True
                 else:

@@ -859,11 +859,11 @@ export function apply(ctx, config = {}) {
         event.journal_route = 'command'
         await bot.saveEvents()
         if (!chatEnabled && command.action === 'start') {
-          await sendReply('聊天功能尚未开启。仍可发送待办、想法，或使用“/记 具体内容”保存记录。', event)
+          await sendReply('聊天功能尚未开启。仍可直接发记录或想法，或使用“/记 具体内容”保存。', event)
           return
         }
         const result = await chat.command(key, command.action)
-        await sendReply(command.action === 'stop' && !llm.enabled ? '已退出聊天，当前按规则记录待办和想法。' : result.reply, event)
+        await sendReply(command.action === 'stop' && !llm.enabled ? '已退出聊天，当前按规则记录。' : result.reply, event)
         return
       }
       if (!llm.enabled) {
@@ -1154,11 +1154,11 @@ export function apply(ctx, config = {}) {
       : `${shortDate(item.at.date)} ${clock(item)}　${item.text}`))
     section(`记录 ${untimed.length}`, untimed.slice(0, 6).map((item) => `· ${item.text}`))
     section(`报销 ${reimburse.length + invoices.length}`, [
-      ...reimburse.slice(0, 4).map((item) => `· ${item.text}（待办）`),
+      ...reimburse.slice(0, 4).map((item) => `· ${item.text}（记录）`),
       ...invoices.map((row) => `· ${row.invoice.seller || row.name}　¥${row.invoice.amount || '—'}　${shortDate(row.invoice.date)}`),
     ])
     section(`收藏待读 ${reading.length}`, reading.map((item) => `· ${item.title || item.url}`))
-    if (!lines.length) return { receipt: '今天没有安排，待办和收藏也是空的。' }
+    if (!lines.length) return { receipt: '今天没有安排，记录和收藏也是空的。' }
     lines.push('', `未完成共 ${tasks.length} 条`)
     return { receipt: lines.join('\n') }
   }
@@ -1213,7 +1213,7 @@ export function apply(ctx, config = {}) {
       const addition = String(item.note || '').trim()
       const note = !addition || previous.includes(addition) ? previous : [previous, addition].filter(Boolean).join('\n')
       await journalCommand(['set', '--id', id, '--note', note, '--expected-revision', String(detail.item.revision ?? '')])
-      lines.push(`已补进待办「${item.text}」${addition ? '：' + addition : ''}`)
+      lines.push(`已补进「${item.text}」${addition ? '：' + addition : ''}`)
     }
     event.journal_route = 'merge'
     await bot.saveEvents()

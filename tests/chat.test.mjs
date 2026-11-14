@@ -106,7 +106,7 @@ test('ledger queries answer without writing; a supplement merges into the existi
     mark: async route => { calls.push(['mark', route]) },
     validate: async () => {},
     record: async () => { calls.push(['record']); return { receipt: '已加入待办：报销发票。' } },
-    merge: async (_capture, targets) => { calls.push(['merge', targets]); return { receipt: '已补进待办「报销发票」' } },
+    merge: async (_capture, targets) => { calls.push(['merge', targets]); return { receipt: '已补进「报销发票」' } },
   }
   let decision
   const llm = { classify: async () => decision }
@@ -124,7 +124,7 @@ test('ledger queries answer without writing; a supplement merges into the existi
     items: [{ type: 'task', text: '报销发票', note: '补充：这笔是打车费（¥15.20）', quote: '打车费',
       project: null, due: null, at: null, place: null, time_quote: null }], model: { provider: 'p', model: 'm' } }
   const merged = await chat.route('wx', { text: '补进去，打车费', ev: '2' }, handlers)
-  assert.equal(merged.reply, '已补进待办「报销发票」')
+  assert.equal(merged.reply, '已补进「报销发票」')
   assert.deepEqual(calls, [['mark', 'auto'], ['merge', ['t_1']]])
   const replay = await chat.route('wx', { text: '补进去，打车费', ev: '2' }, handlers)
   assert.equal(replay.duplicate, true)
