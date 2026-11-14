@@ -304,18 +304,18 @@ window.__ModuleLoader__.load({
         key(a).localeCompare(key(b)) || (a.created || '').localeCompare(b.created || '')
     }
 
-    function TaskRow({ item, projects, onSet, onMove, onEdit }) {
+    function TaskRow({ item, projects, onSet, onMove, onEdit, showCheck = true }) {
       const when = whenInfo(item)
       return h(
         'div',
         { className: 'jp-row' },
-        h('input', {
+        showCheck ? h('input', {
           className: 'jp-check',
           type: 'checkbox',
           'aria-label': `完成任务：${item.text}`,
           checked: item.status === 'done',
           onChange: (e) => onSet(item.id, { status: e.target.checked ? 'done' : 'open' }),
-        }),
+        }) : null,
         h('span', { className: `jp-text${item.status === 'done' ? ' done' : ''}` }, item.text),
         h('button', { className: 'jp-act jp-detail-entry', 'aria-label': `查看详情：${item.text}`, onClick: () => onEdit(item.id) }, '详情'),
         item.status === 'parked' ? h('span', { className: 'jp-badge' }, '暂缓') : null,
@@ -424,38 +424,32 @@ window.__ModuleLoader__.load({
     }
 
     function TodoTab({ state, onSet, onEdit, onAdd }) {
-      const [filter, setFilter] = useState('open')
       const [draft, setDraft] = useState('')
       const [project, setProject] = useState('')
       const [busy, setBusy] = useState(false)
-      const tasks = state.items.filter(i => i.type === 'task' && i.status === filter)
+      // 记录不分「完成/未完成」，只按时间排；丢弃掉的才不显示。
+      const records = state.items.filter((item) => item.type === 'task' && item.status !== 'dropped' && item.status !== 'done')
       const submit = async () => {
         if (!draft.trim() || busy) return
         const text = draft
         setBusy(true)
-        try { if (await onAdd({ text: text.trim(), project })) { setDraft(current => current === text ? '' : current); setFilter('open') } }
+        try { if (await onAdd({ text: text.trim(), project })) setDraft((current) => current === text ? '' : current) }
         finally { setBusy(false) }
       }
       const groups = [{ id: '', name: '未关联项目' }, ...state.projects]
       return h('div', null,
-        h('div', { className: 'jp-toolbar' },
-          h('div', { className: 'jp-segments', 'aria-label': '任务状态' },
-            [['open','待办'],['parked','暂缓'],['done','已完成']].map(([key,label]) => h('button', {
-              key, className: 'jp-filter', 'aria-pressed': filter === key, onClick: () => setFilter(key),
-            }, label, h('span', null, state.items.filter(i => i.type === 'task' && i.status === key).length))))),
         h('div', { className: 'jp-addrow jp-quickadd' },
-          h('input', { className: 'jp-input', 'aria-label': '新增任务', placeholder: '添加任务…', value: draft,
+          h('input', { className: 'jp-input', 'aria-label': '新增记录', placeholder: '记一笔…', value: draft,
             onChange: e => setDraft(e.target.value), onKeyDown: e => { if (e.key === 'Enter' && !e.nativeEvent?.isComposing) void submit() } }),
-          h('select', { className: 'jp-input jp-project-picker', 'aria-label': '新任务所属项目', value: project, onChange: e => setProject(e.target.value) },
+          h('select', { className: 'jp-input jp-project-picker', 'aria-label': '新记录所属项目', value: project, onChange: e => setProject(e.target.value) },
             groups.map(p => h('option', { key: p.id, value: p.id }, p.name))),
-          h('button', { className: 'jp-btn', disabled: busy || !draft.trim(), onClick: submit }, '添加')),
-        filter === 'done' ? h(CompletedTab, { state, onEdit, onSet }) :
-          tasks.length ? groups.map(p => {
-            const rows = tasks.filter(i => (i.project || '') === p.id)
-            return rows.length ? h('section', { key: p.id, className: 'jp-group' },
-              h('h2', { className: 'jp-section-title' }, p.name),
-              rows.sort(compareTasks).map(item => h(TaskRow, { key: item.id, item, projects: state.projects, onSet, onEdit }))) : null
-          }) : h('div', { className: 'jp-empty' }, filter === 'open' ? '当前没有待办。' : '没有暂缓的任务。'))
+          h('button', { className: 'jp-btn', disabled: busy || !draft.trim(), onClick: submit }, '记下')),
+        records.length ? groups.map((p) => {
+          const rows = records.filter((item) => (item.project || '') === p.id).sort(compareTasks)
+          return rows.length ? h('section', { key: p.id, className: 'jp-group' },
+            h('h2', { className: 'jp-section-title' }, p.name),
+            rows.map((item) => h(TaskRow, { key: item.id, item, projects: state.projects, onSet, onEdit, showCheck: false }))) : null
+        }) : h('div', { className: 'jp-empty' }, '还没有记录。'))
     }
 
     function projectTimeline(project, items) {
@@ -478,7 +472,7 @@ window.__ModuleLoader__.load({
       return h('article', { className: 'jp-project-body' },
         h('div', { className: 'jp-project-heading' }, h('h2', null, project.name),
           h('span', { className: 'jp-badge' }, project.status === 'active' || !project.status ? '进行中' : '非活跃')),
-        h('section', {className:'jp-project-section'}, h('h3',{className:'jp-section-title'}, `待办 · ${tasks.length}`), tasks.length ? tasks.sort(compareTasks).map(item=>h('button',{key:item.id,className:'jp-project-task',onClick:()=>onEdit(item.id)},item.text)) : h('p',{className:'jp-empty'},'当前没有待办。')),
+        h('section', {className:'jp-project-section'}, h('h3',{className:'jp-section-title'}, `记录 · ${tasks.length}`), tasks.length ? tasks.sort(compareTasks).map(item=>h('button',{key:item.id,className:'jp-project-task',onClick:()=>onEdit(item.id)},item.text)) : h('p',{className:'jp-empty'},'还没有记录。')),
         h(Overview, { project, onSave }),
         h('section', { className: 'jp-project-section' },
           h('h3', { className: 'jp-section-title' }, '进展历程'),
@@ -761,7 +755,7 @@ window.__ModuleLoader__.load({
     }
 
     const FIELD_LABEL = { goal: '目标', state: '进展', next: '下一步', open: '未决问题', name: '名称', type: '类型', place: '地点', status: '状态', project: '归属', text: '内容', due: '截止日期', due_raw: '截止原文', at: '发生时间', at_raw: '发生原文', ev: '来源', evidence: '来源确认' }
-    const STATUS_LABEL = { open: '待办', done: '已完成', parked: '已暂缓', dropped: '已放弃', new: '已保存', promoted: '已转为任务' }
+    const STATUS_LABEL = { open: '记录', done: '已完成', parked: '已暂缓', dropped: '已放弃', new: '已保存', promoted: '已转为任务' }
 
     function RecentTab({ state }) {
       const { data: rows, error, retry } = useRemoteData('recent?limit=60', (state.evidence?.records || []).map(r => r.review_revision || '').join('|'))
@@ -1131,13 +1125,13 @@ window.__ModuleLoader__.load({
 
 
     function actionNotice(action, payload, result) {
-      if (action === 'item.add') return `${(result.type || payload.type) === 'idea' ? '已保存想法' : '已加入待办'}：${result.text || payload.text}。`
+      if (action === 'item.add') return `${(result.type || payload.type) === 'idea' ? '已保存想法' : '已记下'}：${result.text || payload.text}。`
       if (action === 'item.set') {
         if (Array.isArray(result.changed) && !result.changed.length) return '内容未变化，无需更新。'
         if (result.changed?.includes('status')) return `已更新状态：${STATUS_LABEL[payload.status] || payload.status}。`
         return '条目修改已保存。'
       }
-      if (action === 'idea.promote') return result.duplicate ? '关联待办已存在，未重复创建。' : '已将想法转为待办。'
+      if (action === 'idea.promote') return result.duplicate ? '关联记录已存在，未重复创建。' : '已将想法转为记录。'
       if (action === 'project.add') return `已创建项目：${result.name || payload.name}。`
       if (action === 'project.set') return '项目修改已保存。'
       if (action === 'project.remove') return `已移除项目，保留原有条目${result.items_detached ? `；${result.items_detached} 条记录已解除项目关联` : ''}。`
@@ -1233,7 +1227,7 @@ window.__ModuleLoader__.load({
           { className: 'jp-inner' },
           h('header', { className: 'jp-head' }, h('h1', { className: 'jp-title' }, '账本')),
           h('nav', { className: 'jp-tabs', 'aria-label': '账本导航' },
-            [['today','今天'],['now','待办'],['projects','项目'],['notebook','本子'],['ideas','想法'],['activity','活动']].map(([key,label]) =>
+            [['today','今天'],['now','记录'],['projects','项目'],['notebook','本子'],['ideas','想法'],['activity','活动']].map(([key,label]) =>
               h('button', { key, className: 'jp-tab', 'data-active': String(tab === key), 'aria-pressed': tab === key, onClick: () => setTab(key) }, label))),
           editingId ? h(ItemDetail, {
             key: editingId, id: editingId, projects: state.projects,
@@ -1246,7 +1240,7 @@ window.__ModuleLoader__.load({
             onSaved: (type, corrected, result) => {
               setEditingId(null)
               if (corrected) setTab(type === 'task' ? 'now' : 'ideas')
-              setNotice(Array.isArray(result.changed) && !result.changed.length ? '内容未变化，无需更新。' : corrected ? `已改为${type === 'task' ? '待办' : '想法'}，来源和修改历史已保留。` : '条目修改已保存。')
+              setNotice(Array.isArray(result.changed) && !result.changed.length ? '内容未变化，无需更新。' : corrected ? `已改为${type === 'task' ? '记录' : '想法'}，来源和修改历史已保留。` : '条目修改已保存。')
             },
           }) : null,
           notice ? h('div', { className: 'jp-notice', role: 'status' }, notice,
