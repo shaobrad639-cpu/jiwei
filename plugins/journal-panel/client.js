@@ -1155,29 +1155,59 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [loadError, setLoadError] = useState('')
       const loadSequence = useRef(0)
+      const loadInFlight = useRef(null)
+      const loadFailures = useRef(0)
 
-      const load = useCallback(async () => {
+      // 单飞：非强制调用复用正在进行的那个 Promise；强制调用（面板动作之后要立刻看到
+      // 新状态）另起一个，旧请求的结果由 loadSequence 判定为过期后丢弃。
+      const load = useCallback(async (force = false) => {
+        if (loadInFlight.current && !force) return loadInFlight.current
         const request = ++loadSequence.current
-        try {
-          const [next, shelf, bills] = await Promise.all([api('state'), api('reading').catch(() => ({ items: [] })),
-            api('invoices').catch(() => ({ items: [] }))])
-          if (!Array.isArray(next.projects) || !Array.isArray(next.items) || !next.stats) throw new Error('账本数据格式异常')
-          if (request === loadSequence.current) {
-            setState(next)
-            setReading(Array.isArray(shelf.items) ? shelf.items : [])
-            setInvoices(Array.isArray(bills.items) ? bills.items : [])
-            setLoadError('')
+        const task = (async () => {
+          try {
+            const [next, shelf, bills] = await Promise.all([api('state'), api('reading').catch(() => ({ items: [] })),
+              api('invoices').catch(() => ({ items: [] }))])
+            if (!Array.isArray(next.projects) || !Array.isArray(next.items) || !next.stats) throw new Error('账本数据格式异常')
+            if (request === loadSequence.current) {
+              loadFailures.current = 0
+              setState(next)
+              setReading(Array.isArray(shelf.items) ? shelf.items : [])
+              setInvoices(Array.isArray(bills.items) ? bills.items : [])
+              setLoadError('')
+            }
+          } catch (e) {
+            if (request === loadSequence.current) {
+              loadFailures.current += 1
+              setLoadError(e.message)
+            }
+          } finally {
+            if (loadInFlight.current === task) loadInFlight.current = null
           }
-        } catch (e) {
-          if (request === loadSequence.current) setLoadError(e.message)
-        }
+        })()
+        loadInFlight.current = task
+        return task
       }, [])
 
       useEffect(() => {
-        void load()
-        // 微信那边随时会进新东西，面板不能只在挂载时读一次
-        const timer = setInterval(() => void load(), 15000)
-        return () => clearInterval(timer)
+        let stopped = false
+        let timer = null
+        const schedule = () => {
+          if (stopped) return
+          // 后端卡住或解释器缺失时按 15s → 30s → 60s → 120s 退避，别每 15 秒刷一次。
+          const failures = loadFailures.current
+          const wait = failures ? Math.min(15000 * 2 ** failures, 120000) : 15000
+          timer = setTimeout(() => { void tick() }, wait)
+        }
+        const tick = async () => {
+          if (stopped) return
+          await load()
+          schedule()
+        }
+        void load().finally(schedule)
+        return () => {
+          stopped = true
+          if (timer) clearTimeout(timer)
+        }
       }, [load])
 
       const act = useCallback(
@@ -1187,7 +1217,7 @@ window.__ModuleLoader__.load({
             setNotice('')
             const result = await api('action', { action, ...payload })
             setNotice(actionNotice(action, payload, result))
-            await load()
+            await load(true)
             return result
           } catch (e) {
             setError(e.message)
@@ -1215,7 +1245,7 @@ window.__ModuleLoader__.load({
 
       if (!state) return h('div', { className: 'jp-root' },
         h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
-        h('div', { className: 'jp-inner' }, loadError ? h(LoadError, { error: loadError, retry: load })
+        h('div', { className: 'jp-inner' }, loadError ? h(LoadError, { error: loadError, retry: () => load(true) })
           : h('div', { className: 'jp-loading', role: 'status' }, '读取中…')))
 
       return h(
@@ -1234,7 +1264,7 @@ window.__ModuleLoader__.load({
             onClose: () => setEditingId(null),
             onSave: async patch => {
               const result = await api('action', { action: 'item.set', ...patch })
-              await load()
+              await load(true)
               return result
             },
             onSaved: (type, corrected, result) => {
@@ -1245,7 +1275,7 @@ window.__ModuleLoader__.load({
           }) : null,
           notice ? h('div', { className: 'jp-notice', role: 'status' }, notice,
             h('button', { className: 'jp-act', onClick: () => setNotice('') }, '关闭提示')) : null,
-          loadError ? h(LoadError, { error: loadError, retry: load }) : null,
+          loadError ? h(LoadError, { error: loadError, retry: () => load(true) }) : null,
           error ? h('div', { className: 'jp-error', role: 'alert' }, `操作失败：${error}`,
             h('button', { className: 'jp-act', onClick: () => setError('') }, '关闭提示')) : null,
           h(

@@ -22,6 +22,12 @@ export const inject = ['webServer']
 const ENV_DIR = process.env.JOURNAL_DIR || process.env.DSH_JOURNAL_DIR || ''
 const ENV_READING = process.env.READING_INBOX_DIR || process.env.DSH_READING_INBOX_DIR || ''
 
+/** 解释器探测顺序；config.python 填了的话排在最前面。 */
+const PYTHON_CANDIDATES = ['python3', 'python']
+const PROBE_TIMEOUT_MS = 8000
+/** 单条 journal.py 命令的上限：超时即 SIGKILL，避免面板动作队列被卡死。 */
+const RUN_TIMEOUT_MS = 30000
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload)
   res.writeHead(status, {
@@ -61,29 +67,93 @@ export function apply(ctx, config = {}) {
   const dataDir = typeof config.dataDir === 'string' && config.dataDir.trim() ? config.dataDir.trim() : ENV_DIR
   const readingDir =
     typeof config.readingInbox === 'string' && config.readingInbox.trim() ? config.readingInbox.trim() : ENV_READING
+  const log = (message) => process.stderr.write(`[journal-panel] ${message}\n`)
   if (!dataDir) {
-    process.stderr.write(
-      '[journal-panel] 未配置账本目录，面板未启用。\n' +
-        '  请在 profile 的 cordis.patch.yml 里给 journal-panel 填 config.dataDir，\n' +
-        '  或设置环境变量 JOURNAL_DIR 后重启。\n',
+    log('未配置账本目录，面板未启用。请在 profile 的 cordis.patch.yml 里给 journal-panel 填 config.dataDir，或设置环境变量 JOURNAL_DIR 后重启。')
+    // 没有静态资源可给的插件，返回 404 会让面板只显示「服务器返回了无效内容」。
+    // 这里给出能照着做的错误文本，用户知道下一步该改哪个文件。
+    ctx.effect(() =>
+      ctx.webServer.register({
+        kind: 'prefix',
+        path: '/journal',
+        handler: (req, res) =>
+          sendJson(res, 400, {
+            error: '面板还没配置账本目录：请在 profile 的 cordis.patch.yml 里给 journal-panel 填 config.dataDir，或设置 JOURNAL_DIR 后重启 DSH。',
+          }),
+      }),
     )
     return
   }
-  const python = typeof config.python === 'string' && config.python.trim() ? config.python.trim() : 'python'
   const script = join(dataDir, 'journal.py')
-  const log = (message) => process.stderr.write(`[journal-panel] ${message}\n`)
+
+  // macOS 只自带 python3，Windows 常只有 python；原来写死 'python' 会让面板每个
+  // 接口都返回看不懂的 400。先按配置探测，再按平台常见名字回退。
+  const configuredPython = typeof config.python === 'string' ? config.python.trim() : ''
+  const pythonCandidates = [...new Set([configuredPython, ...PYTHON_CANDIDATES].filter(Boolean))]
+  let pythonPromise = null
+
+  async function probePython() {
+    const failures = []
+    for (const candidate of pythonCandidates) {
+      try {
+        const { stdout } = await exec(candidate, ['-c', 'import sys;print("%d.%d" % sys.version_info[:2])'], {
+          windowsHide: true,
+          timeout: PROBE_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+          encoding: 'utf8',
+        })
+        const version = String(stdout || '').trim()
+        // 有些机器上 `python` 还是 Python 2；解释器能跑不代表 journal.py 能跑。
+        if (!/^3\./.test(version)) {
+          failures.push(`${candidate}：是 Python ${version || '?'}，需要 3.x`)
+          continue
+        }
+        log(`使用 Python：${candidate}（${version}）`)
+        return { command: candidate, version }
+      } catch (error) {
+        failures.push(`${candidate}：${error?.code === 'ENOENT' ? '找不到' : String(error?.message || '不可用').split('\n')[0]}`)
+      }
+    }
+    throw new Error(
+      `找不到可用的 Python 3 解释器（已试 ${failures.join('，')}）。` +
+        '请在 profile 的 cordis.patch.yml 里给 journal-panel 填 config.python（例如 python3），或安装 Python 3 后重启 DSH。',
+    )
+  }
+
+  function findPython() {
+    if (!pythonPromise) {
+      pythonPromise = probePython().catch((error) => {
+        // 不缓存失败：用户装好 Python 后点「重试」应该能直接恢复。
+        pythonPromise = null
+        throw error
+      })
+    }
+    return pythonPromise
+  }
+  void findPython().catch((error) => log(`Python 探测失败：${error.message}`))
 
   async function run(args) {
+    const { command } = await findPython()
     try {
-      const { stdout } = await exec(python, [script, ...args], {
+      const { stdout } = await exec(command, [script, ...args], {
         cwd: dataDir,
         windowsHide: true,
         maxBuffer: 64 * 1024 * 1024,
         encoding: 'utf8',
+        // journal.py 卡住时不能让面板的 actionQueue 一直排着：到点杀掉子进程再报错。
+        timeout: RUN_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
       })
       return stdout
     } catch (error) {
-      throw new Error(error.stderr?.trim().split(/\r?\n/).pop() || '账本操作失败，请重试')
+      if (error?.code === 'ENOENT') {
+        throw new Error('找不到配置的 Python 解释器，请检查 journal-panel 的 config.python，或安装 Python 后重启 DSH。')
+      }
+      if (error?.killed || error?.signal === 'SIGKILL') {
+        throw new Error(`账本命令超过 ${RUN_TIMEOUT_MS / 1000} 秒未返回，已中止：journal.py ${args[0] || ''}。可稍后重试。`)
+      }
+      const stderr = String(error?.stderr || '').trim().split(/\r?\n/).pop()
+      throw new Error(stderr || error?.message || '账本操作失败，请重试')
     }
   }
 
