@@ -1,20 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, symlinkSync, readlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, symlinkSync, readlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
+import { python } from './python.mjs'
+
 const repo = resolve('.')
-const python = process.env.DSH_PYTHON || 'python'
 function run(exe, args, env) {
   const result = spawnSync(exe, args, { encoding: 'utf8', env: { ...process.env, ...env } })
   assert.equal(result.status, 0, result.stderr || result.error?.message || result.stdout)
   return result.stdout
 }
 
-test('installer: dry-run, quoted paths, Python config, idempotence and data preservation', () => {
+test('installer: dry-run, quoted paths, Python config, idempotence and data preservation', t => {
   const temp = mkdtempSync(join(tmpdir(), 'dsh-journal-test-'))
+  t.after(() => rmSync(temp, { recursive: true, force: true }))
   const profile = join(temp, 'profiles', 'desktop')
   const data = join(temp, "user's notes", 'data')
   mkdirSync(profile, { recursive: true })

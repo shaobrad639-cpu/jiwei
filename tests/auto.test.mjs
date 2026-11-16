@@ -9,7 +9,7 @@ import { JournalLlm } from '../plugins/reading-inbox/llm.js'
 import { WeChatBot } from '../plugins/reading-inbox/wechat.js'
 import { apply } from '../plugins/reading-inbox/index.js'
 
-const python = process.env.DSH_PYTHON || 'python'
+import { python } from './python.mjs'
 const model = { provider: 'configured', model: 'm' }
 const at = '2026-10-31T23:58:00+08:00'
 const row = (text, quote = text, extra = {}) => ({ type: 'task', text, quote, note: '',

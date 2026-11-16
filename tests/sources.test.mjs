@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { runInNewContext } from 'node:vm'
 import { apply } from '../plugins/journal-panel/index.js'
+import { python } from './python.mjs'
 
 test('project directory picker navigates outside workspace and binds another directory through the panel API', async t => {
   const temp = mkdtempSync(join(tmpdir(), 'journal-directories-'))
@@ -20,7 +21,6 @@ test('project directory picker navigates outside workspace and binds another dir
   writeFileSync(join(other, 'notes.txt'), '原有项目文件')
   symlinkSync(workspace, join(other, 'linked-directory'), process.platform === 'win32' ? 'junction' : 'dir')
   for (const file of readdirSync('journal').filter(f => f.endsWith('.py'))) copyFileSync(join('journal', file), join(data, file))
-  const python = process.env.DSH_PYTHON || 'python'
   const init = spawnSync(python, [join(data, 'journal.py'), 'init'], { encoding: 'utf8', env: { ...process.env, JOURNAL_DIR: data } })
   assert.equal(init.status, 0, init.stderr)
   let handle

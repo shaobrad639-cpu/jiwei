@@ -9,7 +9,7 @@ import { JournalLlm } from '../plugins/reading-inbox/llm.js'
 import { WeChatBot } from '../plugins/reading-inbox/wechat.js'
 import { apply } from '../plugins/reading-inbox/index.js'
 
-const python = process.env.DSH_PYTHON || 'python'
+import { python } from './python.mjs'
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'journal-chat-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))

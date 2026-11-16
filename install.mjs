@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, symli
 import { join, resolve, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLUGINS = ['reading-inbox', 'journal-panel']
@@ -26,13 +27,20 @@ const BLOCK_START = '# >>> dsh-journal installer >>>'
 const BLOCK_END = '# <<< dsh-journal installer <<<'
 
 function parseArgs(argv) {
-  const out = { data: '', profile: 'desktop', dry: false, python: 'python', llm: true, provider: '', model: '' }
+  const out = { data: '', profile: 'desktop', dry: false, python: '', llm: true, provider: '', model: '' }
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
     if (a === '--dry-run') out.dry = true
     else if (a === '--data') out.data = argv[++i] || ''
     else if (a === '--profile') out.profile = argv[++i] || 'desktop'
-    else if (a === '--python') out.python = argv[++i] || 'python'
+    else if (a === '--python') {
+      const value = argv[++i]
+      if (!value) {
+        console.error('\n✗ --python 需要一个解释器路径，例如 --python /usr/bin/python3\n')
+        process.exit(1)
+      }
+      out.python = value
+    }
     else if (a === '--no-llm') out.llm = false
     else if (a === '--llm-provider') out.provider = argv[++i] || ''
     else if (a === '--llm-model') out.model = argv[++i] || ''
@@ -59,6 +67,37 @@ const fail = (msg) => {
 // Windows 编辑器经常写入 BOM，JSON.parse / YAML 都不认，读的时候先剥掉
 const readText = (path) => readFileSync(path, 'utf8').replace(/^\uFEFF/, '')
 
+// 解释器：不传 --python 时先探测 python3 再探测 python；都不在就明确报错，
+// 不再把 'python' 原样写进配置（macOS 上根本没有这个命令）。
+function pythonInfo(command) {
+  const result = spawnSync(command, ['-c', 'import sys; print("%d.%d" % sys.version_info[:2]); print(sys.executable)'], { encoding: 'utf8' })
+  if (result.error || result.status !== 0) return null
+  const [version, executable] = result.stdout.trim().split('\n')
+  return { version, executable: executable || command }
+}
+if (!args.python) {
+  const tried = []
+  for (const name of ['python3', 'python']) {
+    tried.push(name)
+    const found = pythonInfo(name)
+    if (found) { args.python = found.executable; break }
+  }
+  if (!args.python) {
+    fail(`找不到可用的 Python 解释器（试过 ${tried.join('、')}）。\n  请安装 Python 3.10+，或用 --python /path/to/python 指定。`)
+  }
+}
+const pythonResolved = pythonInfo(args.python)
+if (!pythonResolved) {
+  fail(`无法运行 Python 解释器：${args.python}\n  请确认路径正确，或用 --python 指定一个可用的 Python 3.10+。`)
+}
+const [pyMajor, pyMinor] = pythonResolved.version.split('.').map(Number)
+if (pyMajor < 3 || (pyMajor === 3 && pyMinor < 8)) {
+  fail(`Python ${pythonResolved.version} 太旧，账本无法运行。请安装 Python 3.10+，或用 --python 指定。`)
+}
+if (pyMajor === 3 && pyMinor < 10) {
+  log(`  ! 注意：Python ${pythonResolved.version} 低于 INSTALL.md 要求的 3.10；如遇异常，请用 --python 指定 3.10+ 的解释器。`)
+}
+
 if (Boolean(args.provider) !== Boolean(args.model)) fail('--llm-provider 与 --llm-model 必须同时填写')
 
 if (!existsSync(join(profileDir, 'package.json'))) {
@@ -72,6 +111,7 @@ log(`\ndsh-journal 安装器`)
 log(`  DSH profile : ${profileDir}`)
 log(`  数据目录    : ${dataDir}`)
 log(`  仓库位置    : ${HERE}`)
+log(`  Python      : ${args.python} (${pythonResolved.version})`)
 if (args.dry) log(`  （dry-run，不会写入任何文件）`)
 
 /* ------------------------------------------------------------------ 1. 数据 */
@@ -258,7 +298,7 @@ log(`
   3. 第一次用微信通道：左侧栏「碎片阅读」→ 接入微信 → 手机扫码。
 
 验证：
-  python "${join(dataDir, 'journal.py')}" status
+  ${args.python} "${join(dataDir, 'journal.py')}" status
 
 数据在哪里：
   账本      ${dataDir}
