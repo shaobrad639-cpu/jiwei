@@ -111,6 +111,27 @@ def day() -> dt.date:
     return now().date()
 
 
+def stamp_dt(stamp) -> dt.datetime | None:
+    """解析任意时间戳：没时区按本机时区补，解析不了返回 None（不抛错）。"""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        value = dt.datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value.replace(tzinfo=TZ) if value.tzinfo is None else value
+
+
+def stamp_local(stamp) -> str | None:
+    """把时间戳归一成带时区的本地 iso；解析不了返回 None。
+
+    旧 store 和手改出来的时间戳常常没有时区，直接拿去和 now() 比会在
+    render/status 里抛 can't compare offset-naive and offset-aware。
+    """
+    value = stamp_dt(stamp)
+    return iso(value.astimezone(TZ)) if value else None
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:4]}"
 
@@ -270,17 +291,67 @@ def when_key(item: dict) -> str:
 
 # --------------------------------------------------------------------- store
 def blank_store() -> dict:
-    return {"version": 1, "projects": [], "items": [], "pending": [], "cursor": {}}
+    return {"version": 1, "projects": [], "items": [], "pending": [], "cursor": {},
+            "archive": []}
+
+
+def repair_item(item: dict) -> dict:
+    """把旧 store / 手改出来的脏条目就地补齐，render 不再因缺字段崩。
+
+    只补到「能安全读写」为止：类型、状态、时间戳、history 的形状。
+    解析不了的时间戳记进 _repaired 再兜底成当前时间，原始值留档可查。
+    """
+    if not isinstance(item, dict):
+        return item
+    ident = str(item.get("id") or "")
+    kinds = TYPES if item.get("type") in TYPES else None
+    if not kinds:
+        item["type"] = ("idea" if ident.startswith("k_")
+                        else "ref" if ident.startswith("r_") else "task")
+    statuses = TASK_STATUS if item["type"] == "task" else IDEA_STATUS
+    if item.get("status") not in statuses:
+        item["status"] = statuses[0]
+    fallback = iso()
+    for key in ("created", "updated"):
+        raw = item.get(key)
+        fixed = stamp_local(raw)
+        if fixed is None:
+            item.setdefault("_repaired", {})[key] = raw
+            fixed = fallback
+        item[key] = fixed
+    history = item.get("history")
+    if not isinstance(history, list):
+        history = []
+    clean = []
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        row["at"] = stamp_local(row.get("at")) or fallback
+        clean.append(row)
+    item["history"] = clean
+    item.setdefault("text", "")
+    item.setdefault("project", None)
+    item.setdefault("due", None)
+    item.setdefault("at", None)
+    return item
 
 
 def load() -> dict:
     if not STORE.exists():
         return blank_store()
     data = read_json(STORE)
+    if not isinstance(data, dict):
+        raise SystemExit("store.json 的顶层不是对象，结构已坏；请先手工修好再跑（未改动文件）")
     data.setdefault("projects", [])
     data.setdefault("items", [])
     data.setdefault("pending", [])
     data.setdefault("cursor", {})
+    data.setdefault("archive", [])
+    raw = data["items"]
+    items = [repair_item(it) for it in raw if isinstance(it, dict)]
+    if len(items) != len(raw):
+        print(f"store 里有 {len(raw) - len(items)} 条不是对象的条目，已忽略", file=sys.stderr)
+    data["items"] = items
     return data
 
 
@@ -1236,24 +1307,40 @@ def cmd_promote(args) -> None:
 
 
 def cmd_prune(args) -> None:
-    """删掉超过 N 天的提醒记录。项目关联和报销发票类的保留。"""
+    """清理超过 N 天、没挂项目、没做完也没丢的提醒记录。
+
+    与 RULES.md:238「完成的任务留在已完成页」对齐：done / dropped 一律不删。
+    确实要清的不让它们直接消失——整条记录先写进 store 的 archive 墓碑
+    （带 pruned_at 和原因，可追溯也可还原），再从 items 里移走。
+    """
     data = load()
     days = max(1, int(args.days))
     cutoff = (day() - dt.timedelta(days=days)).isoformat()
+    pruned_at = iso()
     keep, removed = [], []
     for item in data["items"]:
         at = item.get("at") or {}
-        stamp = at.get("date") or (item.get("created") or "")[:10]
-        protected = bool(item.get("project")) or bool(re.search(r"报销|发票", item.get("text") or ""))
+        stamp = at.get("date") or local_date(item.get("created"))
+        protected = (
+            bool(item.get("project"))
+            or bool(re.search(r"报销|发票", item.get("text") or ""))
+            or item.get("status") in ("done", "dropped")
+        )
         if item.get("type") == "task" and not protected and stamp and stamp < cutoff:
-            removed.append({"id": item["id"], "text": item["text"], "at": stamp})
+            tomb = {"id": item["id"], "text": item["text"], "at": stamp,
+                    "status": item.get("status"), "pruned_at": pruned_at,
+                    "reason": f"超过 {days} 天、没挂项目、未完成的提醒"}
+            data.setdefault("archive", []).append({**tomb, "item": item})
+            removed.append(tomb)
             continue
         keep.append(item)
     if removed:
         data["items"] = keep
         save(data)
         render(data)
-    print(json.dumps({"count": len(removed), "removed": removed}, ensure_ascii=False))
+    print(json.dumps({"count": len(removed), "removed": removed,
+                      "archive_total": len(data.get("archive") or [])},
+                     ensure_ascii=False))
 
 
 def cmd_list(args) -> None:
