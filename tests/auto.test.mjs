@@ -354,3 +354,44 @@ test('WeChat default entry uses one classifier, asks then commits, and ingest ex
   assert.equal(routes.find(e => e.id === 'failed').journal_route, 'capture')
   assert.equal(f.captures().length, 3)
 })
+
+// 微信会重投同一条消息。三处保护叠加的结果必须是「只回一次」：
+// 消息入口的 triageQueue 串行化、已送达（delivered）直接跳过、以及
+// 已停止的实例不再分发（见 chat.test.mjs 的 stopped listener 用例）。
+test('redelivery of one message sends the reply only once', async t => {
+  const f = fixture(t)
+  let bot
+  const sent = []
+  const originalLoad = WeChatBot.prototype.load
+  const originalSend = WeChatBot.prototype.sendText
+  WeChatBot.prototype.load = async function () { bot = this; this.credential = { ilink_user_id: 'owner' } }
+  // 真实环境里回执要走一次 HTTP，几百毫秒；delivered 要等它成功才置真。
+  // 这里用延时把这段窗口打开，让重投真的落在「已保存、未确认送达」之间。
+  WeChatBot.prototype.sendText = async function (text) {
+    await new Promise(resolve => setTimeout(resolve, 40))
+    sent.push(text)
+  }
+  t.after(() => { WeChatBot.prototype.load = originalLoad; WeChatBot.prototype.sendText = originalSend })
+  const cleanup = []
+  const ctx = {
+    llm: f.runtime, agentDefaultModel: { currentSelection: () => model }, agents: { currentInitiator: () => undefined },
+    tools: { register() { return () => {} } }, webServer: { register() { return () => {} } },
+    inject(_names, fn) { fn(this) }, on() {},
+    effect(fn) { const dispose = fn(); if (typeof dispose === 'function') cleanup.push(dispose) },
+  }
+  t.after(() => cleanup.reverse().forEach(fn => fn()))
+  apply(ctx, { dataDir: join(f.dir, 'inbox'), journalDir: f.dir, python })
+  const receive = (text, id) => bot.handleMessage({ from_user_id: 'owner', message_id: id,
+    item_list: [{ type: 1, text_item: { text } }] })
+
+  f.output(decision('chat', [], '在的，我一直在。'))
+  // 不 await 第一条，模拟微信把同一条消息并发投递两次
+  const first = receive('你好，在吗？', 'dup')
+  const second = receive('你好，在吗？', 'dup')
+  await Promise.all([first, second])
+  assert.deepEqual(sent, ['在的，我一直在。'], '并发重投只应回一次')
+
+  // 已经送达过的再投一次，同样不该回
+  await receive('你好，在吗？', 'dup')
+  assert.equal(sent.length, 1, '已送达的消息重投不再回')
+})

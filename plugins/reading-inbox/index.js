@@ -396,7 +396,6 @@ export function apply(ctx, config = {}) {
       fallbackAllowed = true
       const ev = eventKey(event)
       // 微信会重投同一条消息；已经处理并送达过的，直接忽略，别再回一遍。
-      // 微信会重投同一条消息；已经送达过的，不再回第二遍。
       const earlier = state.turns.find(turn => turn.id === ev)
       if (earlier && earlier.delivered !== false) return
       // Preserve already registered, version-checked task choices without storing

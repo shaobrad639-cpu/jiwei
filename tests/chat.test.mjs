@@ -354,3 +354,30 @@ test('WeChat routes chat, followups, explicit notes and mode changes; ingest exc
   assert.equal(routes.find(e => e.id === '1').journal_route, 'chat')
   assert.equal(routes.find(e => e.id === 'stranger').journal_route, 'ignored')
 })
+
+// 热重载时旧实例被 stop()，但它的长轮询（getupdates，120 秒）可能刚好在这之后
+// 才返回。旧实现只在 while 顶部检查 signal，await 回来后直接分发，于是旧实例和
+// 新实例各处理一遍同一条消息，微信里收到两个一模一样的回执。
+test('a stopped listener does not dispatch messages that arrive after stop()', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'wechat-stop-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const received = []
+  const bot = new WeChatBot({ dir, onMessage: event => { received.push(event.text) } })
+  bot.credential = { ilink_user_id: 'u1', bot_token: 'fake-token' }
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  // 故意不理会 abort signal：真实网络请求也可能在 abort 之后才返回
+  globalThis.fetch = async () => {
+    await gate
+    return { ok: true, json: async () => ({ ret: 0, get_updates_buf: 'b1',
+      msgs: [{ from_user_id: 'u1', message_id: 'm1', item_list: [{ type: 1, text_item: { text: '你好，在吗？' } }] }] }) }
+  }
+  bot.startListening()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  bot.stop()   // 模拟热重载：旧实例被停掉
+  release()    // 长轮询这时才带着消息返回
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.deepEqual(received, [], '停掉的实例不该再分发消息，否则会和新实例各回一遍')
+})

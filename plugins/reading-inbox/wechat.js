@@ -39,12 +39,25 @@ function timeoutSignal(ms) {
   return AbortSignal.timeout(ms)
 }
 
-async function postJson(path, body, { token, timeoutMs = 40000 } = {}) {
+/** 合并超时信号和调用方的取消信号。AbortSignal.any 要 Node 20，低版本自己接。 */
+function combineSignals(...signals) {
+  const list = signals.filter(Boolean)
+  if (list.length <= 1) return list[0]
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any(list)
+  const controller = new AbortController()
+  for (const signal of list) {
+    if (signal.aborted) { controller.abort(signal.reason); break }
+    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+  }
+  return controller.signal
+}
+
+async function postJson(path, body, { token, timeoutMs = 40000, signal } = {}) {
   const res = await fetch(BASE + path, {
     method: 'POST',
     headers: headers(token),
     body: JSON.stringify(body),
-    signal: timeoutSignal(timeoutMs),
+    signal: combineSignals(timeoutSignal(timeoutMs), signal),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
@@ -333,7 +346,7 @@ export class WeChatBot {
         data = await postJson(
           '/ilink/bot/getupdates',
           { get_updates_buf: buf, base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSH' } },
-          { token: this.credential.bot_token, timeoutMs: 120000 },
+          { token: this.credential.bot_token, timeoutMs: 120000, signal },
         )
       } catch (error) {
         if (signal.aborted) return
@@ -341,6 +354,9 @@ export class WeChatBot {
         await new Promise((resolve) => setTimeout(resolve, 3000))
         continue
       }
+      // 长轮询可能在 stop() 之后才返回（热重载时就是这样）。已经停掉的实例
+      // 不能再分发消息：否则旧实例和新实例会各回一遍，一条消息两个回执。
+      if (signal.aborted) return
       if (data.get_updates_buf) buf = data.get_updates_buf
       const ret = data.ret
       if (ret && ret !== 0) {
