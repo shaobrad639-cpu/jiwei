@@ -327,11 +327,16 @@ test('WeChat default entry uses one classifier, asks then commits, and ingest ex
   assert.match(sent.at(-1), /已记下 1 条/)
   assert.match(sent.at(-1), /已保存 1 条想法/)
   assert.equal(f.journal(['state']).items.length, 3)
+  // 模型挂了不能让消息白丢：退回规则分诊再存一次，且不再调用模型
+  const modelCallsBefore = f.inputs.length
   f.output(new Error('model unavailable'))
   await receive('明天还有任务', 'failed')
-  assert.match(sent.at(-1), /没有自动记入账本/)
-  assert.equal(f.journal(['state']).items.length, 3)
-  assert.equal(ingest().new, 0)
+  assert.match(sent.at(-1), /^已记下：/, '模型失败时应降级为规则记录并回执')
+  assert.match(sent.at(-1), /还有任务/)
+  assert.equal(f.inputs.length, modelCallsBefore + 1, '降级后不该再调一次模型')
+  const afterFallback = f.journal(['state']).items.length
+  assert.equal(afterFallback, 4, '降级的消息应当真的进账本')
+  assert.equal(ingest().new, 0, '降级保存走 triage，不该在 ingest 里再补一遍')
   f.output(decision('clarify', [candidate], '加入待办吗？'))
   sendFails = true
   await receive(original, 'unsent')
@@ -339,12 +344,13 @@ test('WeChat default entry uses one classifier, asks then commits, and ingest ex
   f.output(decision('confirm', [row('比较模型', '对')], '', true))
   await receive('对', 'not-confirmed')
   assert.match(sent.at(-1), /请说明要保存的具体内容/)
-  assert.equal(f.journal(['state']).items.length, 3)
+  assert.equal(f.journal(['state']).items.length, 4, '降级存下的那条仍在')
   assert.equal(ingest().new, 0)
   const routes = JSON.parse(readFileSync(join(f.dir, 'inbox', 'wechat-events.json'), 'utf8'))
   assert.equal(routes.find(e => e.id === 'hello').journal_route, 'chat')
   assert.equal(routes.find(e => e.id === 'q').journal_route, 'clarify')
   assert.equal(routes.find(e => e.id === 'a').journal_route, 'capture')
-  assert.equal(routes.find(e => e.id === 'failed').journal_route, 'auto')
-  assert.equal(f.captures().length, 2)
+  // 降级后这条改判成 capture，这样晚间兜底扫描不会把它再补一遍
+  assert.equal(routes.find(e => e.id === 'failed').journal_route, 'capture')
+  assert.equal(f.captures().length, 3)
 })

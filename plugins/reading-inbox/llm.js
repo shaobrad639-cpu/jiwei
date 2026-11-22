@@ -106,7 +106,7 @@ export function chatErrorMessage(error) {
     JOURNAL_CONTEXT_FAILED: '未能读取账本上下文，请检查账本的 Python 配置。',
     VALIDATION_FAILED: '这条没能记下：时间或内容和原文对不上。换个说法再发一次，比如「今天中午订餐」。',
   }
-  return `${messages[code] || '本次模型对话未完成，请稍后重试。'}（${code}）这条消息没有自动记入账本。`
+  return messages[code] || '暂时没能回复你，请稍后再试。原话仍保留在微信记录中。'
 }
 
 export class JournalLlm {

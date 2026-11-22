@@ -353,6 +353,11 @@ export function apply(ctx, config = {}) {
     if (!event.text?.trim()) return
     const command = chatCommand(event.text)
     let recorded = false
+    // 模型不可用时不能让消息白丢：只要还没写过账本、消息走的是自动分诊，
+    // 就退回确定性规则分诊再存一次。fallbackAllowed 只在跳过所有前置命令
+    // 之后才置真，避免把 /发、/记 这类命令的失败也当成记录来存。
+    let fallbackAllowed = false
+    let writeStarted = false
     try {
       if (command?.action === 'capture') {
         await chat.dismiss(key)
@@ -388,6 +393,7 @@ export function apply(ctx, config = {}) {
         if (!result.duplicate) await sendReply(result.reply, event)
         return
       }
+      fallbackAllowed = true
       const ev = eventKey(event)
       // 微信会重投同一条消息；已经处理并送达过的，直接忽略，别再回一遍。
       // 微信会重投同一条消息；已经送达过的，不再回第二遍。
@@ -409,7 +415,12 @@ export function apply(ctx, config = {}) {
         allowChat: chatEnabled,
         validate: ({ ev: ignored, ...plan }) => journalCommand(['triage', '--text', plan.source_messages.map(s => s.text).join('\n'), '--validate-plan'], plan)
           .catch((error) => { throw Object.assign(new Error(error.message), { code: 'VALIDATION_FAILED', cause: error }) }),
-        record: (capture, options) => captureClassified(event, capture, options),
+        record: async (capture, options) => {
+          writeStarted = true
+          const saved = await captureClassified(event, capture, options)
+          recorded = true
+          return saved
+        },
         merge: (capture, targets) => mergeClassified(event, capture, targets),
         digest: () => buildWeeklyDigest(),
         lastDigest: () => readLatestDigest(),
@@ -424,7 +435,27 @@ export function apply(ctx, config = {}) {
       await chat.acknowledge(key, ev)
     } catch (error) {
       log(`对话或回执失败：${modelErrorCode(error)}`)
-      try { await sendReply(recorded ? '记录已保存，但未能确认回执是否送达，请在账本中查看。' : chatErrorMessage(error), event) }
+      if (fallbackAllowed && !writeStarted && !recorded && event.journal_route === 'auto') {
+        try {
+          const ev = eventKey(event)
+          event.journal_route = 'capture'
+          event.journal_text = event.text
+          event.journal_ev = ev
+          await bot.saveEvents()
+          // 规则分诊是确定性的，不会再碰刚才失败的那个模型。
+          const result = await journalCommand(['triage', '--text', event.text,
+            '--at', event.at || new Date().toISOString(), '--ev', ev])
+          recorded = true
+          await sendReply(result.receipt || '已保存这条记录。', event)
+          return
+        } catch (fallbackError) {
+          log(`规则保存或回执失败：${modelErrorCode(fallbackError)}`)
+        }
+      }
+      const hint = recorded ? '记录已保存，但未能确认回执是否送达，请在账本中查看。'
+        : writeStarted || fallbackAllowed ? '暂时未能确认保存结果，原话仍保留在微信记录中，请在账本中核对。'
+          : chatErrorMessage(error)
+      try { await sendReply(hint, event) }
       catch (sendError) { log(`对话失败提示未送达：${sendError.code || sendError.name || 'unknown'}`) }
     }
   }
