@@ -143,8 +143,8 @@ export class JournalChat {
       state.pending = null
       await this.save(key, state)
       return { mode: state.mode, reply: action === 'start'
-        ? '已进入聊天模式，保留最近 20 轮对话。聊天不会自动记账；发“/记 具体内容”保存一条记录，发“/退出”或“/退出聊天”退出聊天。'
-        : action === 'stop' ? '已退出聊天，恢复自动识别：待办和想法会保存，普通聊天直接回复，不确定时先问你确认。' : '已清空当前对话上下文和待确认提议，账本记录未修改。' }
+        ? '已进入聊天模式。接下来的对话不会自动记账，我们可以随便聊聊。想保存待办发「/记 内容」，想退出发「/退出」即可。'
+        : action === 'stop' ? '已退出聊天，恢复自动记账：发来的待办和灵感会自动归位，拿不准的会先向你确认。' : '已清空当前的对话上下文和待确认提议，账本记录保持原样。' }
     })
   }
 
@@ -204,14 +204,14 @@ export class JournalChat {
             const result = previous.merge_targets
               ? await handlers.merge(previous.capture, previous.merge_targets)
               : await handlers.record(previous.capture)
-            return { ...previous, reply: '🔁 重复：' + result.receipt, duplicate: true, recorded: true }
+            return { ...previous, reply: result.receipt, duplicate: true, recorded: true }
           } catch (error) { throw Object.assign(new Error('未能核对已处理消息'), { code: 'AUTO_CAPTURE_FAILED', cause: error }) }
         }
         await handlers.mark('processed')
         const obsolete = previous.intent === 'clarify' && state.pending?.question_turn_id !== id
-        const base = obsolete ? '这条确认请求已处理或已失效，未重复执行。'
+        const base = obsolete ? '这条确认请求之前已处理或已失效，未重复执行。'
           : previous.intent === 'ref' ? '这条消息已处理，未重复收录资料。' : previous.reply
-        return { ...previous, reply: '🔁 重复：' + base, duplicate: true }
+        return { ...previous, reply: base, duplicate: true }
       }
       await handlers.mark('auto')
       if (REVIEW_COMMAND.test(text) && typeof handlers.digest === 'function') {
@@ -274,12 +274,12 @@ export class JournalChat {
         (!pending || !pending.items.length || latest?.id !== pending.question_turn_id) &&
         ['task', 'idea', 'mixed', 'confirm'].includes(decision.intent)
       if (invalidConfirmation || vagueConfirmation) decision = { ...decision, intent: 'clarify', continuation: false,
-        reply: '你想把哪件事记成待办、保存为想法，还是仅讨论一下？请说明要保存的具体内容。', items: [] }
+        reply: '你想把哪件事记下来呢？请说明要保存的具体内容（或者告诉我这只是闲聊/想法讨论）。', items: [] }
       if (decision.intent === 'ref' && !(decision.continuation ? urls : event.urls)?.length) decision = { ...decision, intent: 'clarify',
         continuation: false, reply: '请补充要收藏的链接，或说明要保存的具体内容。', items: [] }
       if (decision.continuation && pending?.sources.length >= 8) decision = { ...decision,
         intent: 'clarify', continuation: false, items: [],
-        reply: '这次确认经过了多次补充，请重新完整说一下要保存的内容；此前的提议尚未保存。' }
+        reply: '这次记录经过了多次补充，为了避免记错，请重新完整说一下要保存的具体内容（之前的提议尚未保存）。' }
       const related = decision.continuation && pending
       const sources = related ? [...pending.sources, source] : [source]
       const capture = { items: decision.items, model: decision.model, source_messages: sources,
@@ -318,12 +318,12 @@ export class JournalChat {
           asked_at: new Date().toISOString(), delivered: false }
         const preview = proposalPreview(decision.items, journal.projects)
         const hint = preview
-          ? '\n待确认内容（尚未保存）：\n' + preview + '\n回复「好」或具体内容即可保存。'
-          : '\n尚未新增待办或想法。'
+          ? '\n\n为你整理的待确认内容（尚未保存）：\n' + preview + '\n\n觉得合适请回复「好」，或者告诉我怎么修改~'
+          : '\n\n（尚未保存待办或想法，可以随时告诉我具体内容）'
         reply = reply + hint
         await handlers.mark('clarify')
       } else if (decision.intent === 'cancel') {
-        reply = pending ? '已取消这次记录，未新增待办或想法。' : '当前没有待确认的记录，未修改账本。'
+        reply = pending ? '好的，已取消这次记录，没有新增待办或想法。' : '当前没有待确认的记录，账本保持原样。'
         state.pending = null
         await handlers.mark('cancel')
       } else if (decision.intent === 'ref') {
@@ -331,7 +331,7 @@ export class JournalChat {
         state.pending = null
         await handlers.mark('ref')
       } else {
-        if (handlers.allowChat === false) reply = '这条消息是聊天内容，未记入账本。聊天回复功能尚未开启。'
+        if (handlers.allowChat === false) reply = '收到你的消息了，不过聊天回复功能尚未开启。如果有需要记的事，随时发给我整理。'
         await handlers.mark('chat')
       }
       const turn = { id, text, reply, model: decision.model, intent: decision.intent, recorded,

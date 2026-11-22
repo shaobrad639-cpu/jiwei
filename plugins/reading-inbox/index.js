@@ -374,11 +374,11 @@ export function apply(ctx, config = {}) {
         event.journal_route = 'command'
         await bot.saveEvents()
         if (!chatEnabled && command.action === 'start') {
-          await sendReply('聊天功能尚未开启。仍可直接发记录或想法，或使用“/记 具体内容”保存。', event)
+          await sendReply('当前聊天回复功能尚未开启。你可以直接发消息记待办或灵感，也可以用「/记 具体内容」保存。', event)
           return
         }
         const result = await chat.command(key, command.action)
-        await sendReply(command.action === 'stop' && !llm.enabled ? '已退出聊天，当前按规则记录。' : result.reply, event)
+        await sendReply(command.action === 'stop' && !llm.enabled ? '已退出聊天模式，恢复按规则自动记账。' : result.reply, event)
         return
       }
       if (!llm.enabled) {
@@ -452,8 +452,8 @@ export function apply(ctx, config = {}) {
           log(`规则保存或回执失败：${modelErrorCode(fallbackError)}`)
         }
       }
-      const hint = recorded ? '已保存，回执未送达，请在账本中核对。'
-        : writeStarted || fallbackAllowed ? '保存结果未确认，原话仍在微信记录中。'
+      const hint = recorded ? '记录已为你保存好了，只是微信回执确认稍有延迟，可在账本中查看。'
+        : writeStarted || fallbackAllowed ? '刚才的记录正在保存中，原话已完整留存，稍后可在账本中核对。'
           : chatErrorMessage(error)
       try { await sendReply(hint, event) }
       catch (sendError) { log(`对话失败提示未送达：${sendError.code || sendError.name || 'unknown'}`) }
@@ -469,7 +469,7 @@ export function apply(ctx, config = {}) {
   const DIGEST_BODY_BUDGET = 12000
   async function buildWeeklyDigest() {
     const items = await store.read((data) => data.items.filter((item) => item.url && item.status !== 'dropped'))
-    if (!items.length) return { receipt: '收件箱里还没有可点评的链接。' }
+    if (!items.length) return { receipt: '收件箱里目前还没有收藏文章，先转发几篇感兴趣的文章过来吧。' }
     const picked = [...items]
       .sort((a, b) => String(b.updatedAt || b.addedAt || '').localeCompare(String(a.updatedAt || a.addedAt || '')))
       .slice(0, DIGEST_ITEM_LIMIT)
@@ -513,7 +513,7 @@ export function apply(ctx, config = {}) {
 
   async function readLatestDigest() {
     const digest = await store.read((data) => data.digests[0])
-    if (!digest) return { receipt: '还没有生成过点评，先说一句「点评我的收藏」。' }
+    if (!digest) return { receipt: '目前还没有生成过点评，随时对我说「点评我的收藏」即可生成。' }
     return { receipt: digestText(digest) }
   }
 
@@ -544,18 +544,18 @@ export function apply(ctx, config = {}) {
   /** 从附件里挑一份发回微信：有关键词就按名字/商家/日期匹配，没有就发最新的。 */
   async function sendSavedFile(query = '') {
     const file = join(journalDir, 'attachments', 'index.jsonl')
-    if (!existsSync(file)) return { receipt: '还没有保存过文件。' }
+    if (!existsSync(file)) return { receipt: '目前还没有收到或保存过任何文件。' }
     const records = (await readFile(file, 'utf8')).split('\n').filter(Boolean)
       .map((line) => { try { return JSON.parse(line) } catch { return null } })
       .filter((row) => row && row.path && existsSync(row.path))
       .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
-    if (!records.length) return { receipt: '附件都已经过期清掉了，现在没有可发的文件。' }
+    if (!records.length) return { receipt: '之前的附件已按周期清理，目前没有可发送的文件。' }
     const needle = String(query || '').trim().toLowerCase()
     let hit = records[0]
     if (needle) {
       hit = records.find((row) => [row.name, row.path, row.invoice && row.invoice.seller,
         row.invoice && row.invoice.date, row.at].filter(Boolean).join(' ').toLowerCase().includes(needle))
-      if (!hit) return { receipt: `没找到包含「${query}」的文件。发「/发」可以取最近一份。` }
+      if (!hit) return { receipt: `没有找到名称包含「${query}」的文件。直接发「/发」可以获取最近的一份文件。` }
     }
     const isImage = /\.(?:jpe?g|png|gif|webp)$/iu.test(hit.name || hit.path)
     try {
@@ -710,7 +710,7 @@ export function apply(ctx, config = {}) {
       ...invoices.map((row) => `· ${row.invoice.seller || row.name}　¥${row.invoice.amount || '—'}　${shortDate(row.invoice.date)}`),
     ])
     section(`收藏待读 ${reading.length}`, reading.map((item) => `· ${item.title || item.url}`))
-    if (!lines.length) return { receipt: '今天没有安排，记录和收藏也是空的。' }
+    if (!lines.length) return { receipt: '今天暂时没有日程安排，记录和阅读收藏也都很清爽。' }
     lines.push('', `未完成共 ${tasks.length} 条`)
     return { receipt: lines.join('\n') }
   }
@@ -734,7 +734,7 @@ export function apply(ctx, config = {}) {
     const cutoff = Date.now() - UNDO_WINDOW_MS
     const undoAttachment = Boolean(attachment && attachmentAt > cutoff && attachmentAt >= itemAt)
     const undoItem = Boolean(item && itemAt > cutoff && itemAt > attachmentAt)
-    if (!undoAttachment && !undoItem) return { receipt: '最近两小时内没有可撤销的保存。' }
+    if (!undoAttachment && !undoItem) return { receipt: '最近两小时内没有找到可撤销的保存记录。' }
 
     if (undoAttachment) {
       const { record, lines } = attachment
