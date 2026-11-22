@@ -452,8 +452,8 @@ export function apply(ctx, config = {}) {
           log(`规则保存或回执失败：${modelErrorCode(fallbackError)}`)
         }
       }
-      const hint = recorded ? '记录已保存，但未能确认回执是否送达，请在账本中查看。'
-        : writeStarted || fallbackAllowed ? '暂时未能确认保存结果，原话仍保留在微信记录中，请在账本中核对。'
+      const hint = recorded ? '已保存，回执未送达，请在账本中核对。'
+        : writeStarted || fallbackAllowed ? '保存结果未确认，原话仍在微信记录中。'
           : chatErrorMessage(error)
       try { await sendReply(hint, event) }
       catch (sendError) { log(`对话失败提示未送达：${sendError.code || sendError.name || 'unknown'}`) }

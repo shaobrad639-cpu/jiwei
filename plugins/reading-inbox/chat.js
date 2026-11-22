@@ -204,13 +204,14 @@ export class JournalChat {
             const result = previous.merge_targets
               ? await handlers.merge(previous.capture, previous.merge_targets)
               : await handlers.record(previous.capture)
-            return { ...previous, reply: result.receipt, duplicate: true, recorded: true }
+            return { ...previous, reply: '🔁 重复：' + result.receipt, duplicate: true, recorded: true }
           } catch (error) { throw Object.assign(new Error('未能核对已处理消息'), { code: 'AUTO_CAPTURE_FAILED', cause: error }) }
         }
         await handlers.mark('processed')
         const obsolete = previous.intent === 'clarify' && state.pending?.question_turn_id !== id
-        return { ...previous, reply: obsolete ? '这条确认请求已处理或已失效，未重复执行。'
-          : previous.intent === 'ref' ? '这条消息已处理，未重复收录资料。' : previous.reply, duplicate: true }
+        const base = obsolete ? '这条确认请求已处理或已失效，未重复执行。'
+          : previous.intent === 'ref' ? '这条消息已处理，未重复收录资料。' : previous.reply
+        return { ...previous, reply: '🔁 重复：' + base, duplicate: true }
       }
       await handlers.mark('auto')
       if (REVIEW_COMMAND.test(text) && typeof handlers.digest === 'function') {
@@ -316,7 +317,10 @@ export class JournalChat {
         state.pending = { sources, items: decision.items, question: reply, question_turn_id: id,
           asked_at: new Date().toISOString(), delivered: false }
         const preview = proposalPreview(decision.items, journal.projects)
-        reply += (preview ? '\n待确认内容（尚未保存）：\n' + preview : '\n尚未新增待办或想法。')
+        const hint = preview
+          ? '\n待确认内容（尚未保存）：\n' + preview + '\n回复「好」或具体内容即可保存。'
+          : '\n尚未新增待办或想法。'
+        reply = reply + hint
         await handlers.mark('clarify')
       } else if (decision.intent === 'cancel') {
         reply = pending ? '已取消这次记录，未新增待办或想法。' : '当前没有待确认的记录，未修改账本。'

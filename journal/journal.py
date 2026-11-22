@@ -748,7 +748,7 @@ def receipt_description(item: dict, project_name: str | None = None) -> str:
     details = []
     if item.get('at'):
         details.append('时间：' + at_label(item['at']))
-    if item.get('due'):
+    elif item.get('due'):
         details.append('截止：' + due_label(item['due']))
     if item.get('place'):
         details.append('地点：' + item['place'])
