@@ -1100,6 +1100,304 @@ def cmd_pending(_args) -> None:
                      ensure_ascii=False))
 
 
+SHORT_ANSWERS = ('对', '是', '是的', '不是', '好', '好的', '先不做',
+                 '第一个', '第二个', '第三个', '1', '2', '3')
+CHOICE_INDEX = {'第一个': 0, '第二个': 1, '第三个': 2, '1': 0, '2': 1, '3': 2}
+STATUS_LABELS = {'open': '记录', 'done': '已完成', 'parked': '已暂缓',
+                 'dropped': '已放弃', 'new': '已保存', 'promoted': '已转为任务'}
+
+
+class Triage:
+    """一次分诊的上下文：原文、去重键、以及已经开好的回执。
+
+    分诊有十来条互斥的去向，全挤在一个函数里改一处很容易碰坏另一处。
+    这里把共用的东西装进来，每个去向一个函数，返回 None 表示「不是我」。
+    """
+
+    __slots__ = ('data', 'raw', 'rest', 'urls', 'ev', 'at', 'existing', 'args', 'reply')
+
+    def __init__(self, data, raw, rest, urls, ev, at, existing, args, reply):
+        self.data = data
+        self.raw = raw
+        self.rest = rest
+        self.urls = urls
+        self.ev = ev
+        self.at = at
+        self.existing = existing
+        self.args = args
+        self.reply = reply
+
+
+def _triage_cached(t: Triage) -> dict | None:
+    """同一条消息的第二次投递：直接回上次的结果，不重复入库。"""
+    previous = t.data.get('llm_triage', {}).get(t.ev)
+    if previous:
+        return {**previous, 'duplicate': True, 'receipt': repeated_receipt(t.data, t.ev)}
+    answered = next((p for p in t.data.get('pending', []) if p.get('answer_ev') == t.ev), None)
+    if answered:
+        return {'ok': True, 'duplicate': True, 'answered': answered['id'],
+                'receipt': '这条答复已保存，未重复处理。'}
+    return None
+
+
+def _triage_uncertain_answer(t: Triage) -> dict | None:
+    """挂着多个待确认问题时，一句「好」不知道在答哪个，只留原文。"""
+    if t.args.plan or t.existing or len(active_questions(t.data)) <= 1:
+        return None
+    if t.raw.strip('。！! ') not in SHORT_ANSWERS:
+        return None
+    if not capture_has(t.ev):
+        capture_append({'at': t.args.at or iso(), 'text': t.raw, 'urls': [],
+                        'ev': t.ev, 'kind': 'answer_uncertain'})
+    return {'ok': True, 'uncertain': True,
+            'receipt': '答复原文已保存，但尚未修改任务：有多个待确认问题。请带上任务名或问题内容再回复。'}
+
+
+def _triage_answer(t: Triage) -> dict | None:
+    """短文本可能是在回答某个待确认问题。但**必须字面真的对上**：
+
+    光「没有时间词」远远不够，否则一句「仓库还要优化」会被当成回答问题的答案。
+    """
+    if t.args.plan or t.existing or t.urls or not t.data.get('pending') or len(t.raw) > 80:
+        return None
+    target, score, ratio = match_pending(t.data, t.raw)
+    if not (target and score >= 2 and ratio >= 0.2):
+        return None
+
+    target['answered'] = True
+    target['answer'] = t.raw
+    target['answered_at'] = iso()
+    target['answer_ev'] = t.ev
+    # 就算判成答复，原文也必须进证据层——判错了还能捞回来重放
+    if not capture_has(t.ev):
+        capture_append({'at': t.args.at or iso(), 'text': t.rest or t.raw, 'urls': [],
+                        'ev': t.ev, 'kind': 'answer'})
+
+    head = target['question'][:24]
+    receipt = f'已保存答复：{t.raw}（对应问题：{head}）。任务尚未修改，待核对。'
+    short = t.raw.strip().strip('。！!，, ')
+    choices = target.get('choices', [])
+    index = CHOICE_INDEX.get(short)
+    choice = (choices[index] if index is not None and index < len(choices)
+              else next((c for c in choices if short == c['label'] or short in c.get('replies', [])), None))
+    if choice and choice.get('status'):
+        item = next((i for i in t.data['items'] if i['id'] == target.get('item')), None)
+        if item and item_revision(item) == target.get('item_revision'):
+            stamp = iso()
+            item.setdefault('history', []).append({'at': stamp, 'field': 'status',
+                                                   'from': item['status'],
+                                                   'to': choice['status'], 'answer_ev': t.ev})
+            item.update(status=choice['status'], updated=stamp)
+            receipt = f'已更新状态：「{item["text"]}」→ {STATUS_LABELS[choice["status"]]}。'
+            target['applied'] = True
+        else:
+            receipt = '已保存你的选择，但未修改任务：任务已在其他地方更新，请核对最新状态。'
+    target['receipt'] = receipt
+    save(t.data)
+    render(t.data)
+    t.reply.update(answered=target['id'], receipt=receipt)
+    return t.reply
+
+
+def _triage_duplicates(t: Triage) -> dict | None:
+    """同一个 ev 是原样重投；同一件事换了说法靠内容比一遍。"""
+    if t.existing:
+        t.reply.update(created=t.existing['id'], duplicate=True,
+                       receipt=repeated_receipt(t.data, t.ev))
+        return t.reply
+    dup = find_semantic_duplicate(t.data, t.raw, t.at)
+    if dup:
+        t.reply.update(created=dup['id'], duplicate=True,
+                       receipt=f'这条已存在，未重复添加：{dup["text"]}。')
+        return t.reply
+    return None
+
+
+def _triage_check_reply(t: Triage) -> dict | None:
+    if not t.args.check_reply:
+        return None
+    return {'needs_classification': True}
+
+
+def _triage_prepare(t: Triage) -> dict | None:
+    if not t.args.prepare:
+        return None
+    if not capture_has(t.ev):
+        capture_append({'at': t.args.at or iso(), 'text': t.raw, 'urls': t.urls, 'ev': t.ev})
+    return {'needs_llm': True, 'ev': t.ev, 'text': t.raw,
+            'received_at': t.args.at or iso(), 'timezone': 'Asia/Shanghai',
+            'projects': project_list(t.data)}
+
+
+def _triage_plan(t: Triage) -> dict | None:
+    """写入模型给出的提议。模型看不到账本，它的条目仍可能和旧记录重复。"""
+    if not t.args.plan:
+        return None
+    plan = (json.load(sys.stdin) if t.args.plan == '-'
+            else json.loads(Path(t.args.plan).read_text(encoding='utf-8-sig')))
+    proposals, model = journal_llm.validate(plan, t.raw, t.data['projects'])
+
+    skipped = []
+    kept = []
+    for proposal in proposals:
+        dup = find_semantic_duplicate(t.data, proposal['text'], t.at)
+        if dup:
+            skipped.append(dup)
+        else:
+            kept.append(proposal)
+    proposals = kept
+
+    if not proposals:
+        receipt = (f'这条已存在，未重复添加：{skipped[0]["text"]}。' if skipped
+                   else '原文已保存，没有新增记录。')
+        t.reply.update(created=None, ids=[], receipt=receipt, engine='llm', model=model)
+        t.data.setdefault('llm_triage', {})[t.ev] = t.reply
+        save(t.data)
+        return t.reply
+
+    stamp = iso()
+    created = []
+    for index, proposal in enumerate(proposals):
+        kind = proposal['type']
+        created.append({
+            'id': new_id('t' if kind == 'task' else 'k'), 'type': kind,
+            'text': proposal['text'], 'note': proposal['note'],
+            'project': proposal['project'], 'status': 'open' if kind == 'task' else 'new',
+            'due': proposal['due'], 'due_raw': proposal['time_quote'] if proposal['due'] else None,
+            'at': default_at(proposal['at']) if kind == 'task' else proposal['at'],
+            'at_raw': (proposal['time_quote'] if proposal['at'] else '今天') if kind == 'task' else None,
+            'place': proposal['place'], 'created': stamp, 'updated': stamp,
+            'source': 'wechat', 'ev': t.ev, 'ev_part': index, 'llm': model,
+            'quote': proposal['quote'],
+            'history': [{'at': stamp, 'field': 'text', 'from': t.raw,
+                         'to': proposal['text'], 'by': 'llm'}],
+        })
+    if not capture_has(t.ev):
+        capture_append({'at': t.args.at or stamp, 'text': t.raw, 'urls': t.urls, 'ev': t.ev,
+                        **({'source_messages': plan['source_messages']}
+                           if 'source_messages' in plan else {})})
+    t.data['items'].extend(created)
+    t.data['cursor']['lastIngestAt'] = stamp
+    if len(created) == 1:
+        project = find_project(t.data, created[0]['project'])
+        receipt = build_receipt(
+            created[0], project['name'] if project else None,
+            clash_with({'items': [i for i in t.data['items'] if i.get('ev') != t.ev]}, created[0]))
+    else:
+        receipt = build_multi_receipt(created, t.data)
+    t.reply.update(created=created[0]['id'], ids=[i['id'] for i in created],
+                   receipt=receipt, engine='llm', model=model)
+    t.data.setdefault('llm_triage', {})[t.ev] = t.reply
+    save(t.data)
+    render(t.data)
+    return t.reply
+
+
+def _triage_announcement(t: Triage) -> dict | None:
+    """通知/公告整份当成一次来源，只抽主事件和行动项。
+
+    不按句切——否则「各位同学大家好」会变成一条想法。
+    """
+    body = t.rest or t.raw
+    if not is_announcement(body):
+        return None
+    announced = build_announcement(body, t.ev, t.args.at or iso())
+    if not announced:
+        return None
+    if not capture_has(t.ev):
+        capture_append({'at': t.args.at or iso(), 'text': body, 'urls': t.urls, 'ev': t.ev})
+    t.data['items'].extend(announced)
+    t.data['cursor']['lastIngestAt'] = iso()
+    save(t.data)
+    render(t.data)
+    t.reply.update(created=announced[0]['id'], ids=[i['id'] for i in announced],
+                   receipt=build_announce_receipt(announced))
+    return t.reply
+
+
+def _triage_rules(t: Triage) -> dict:
+    """兜底：按标点切句，逐句判类型、抽时间和地点。"""
+    body = t.rest or t.raw
+    when_all = match_project(t.data, body)
+    created: list[dict] = []
+    for index, clause in enumerate(split_clauses(body)[:6]):
+        if URL_RE.fullmatch(clause):
+            continue
+        when_raw, text = extract_when(clause)
+        if len(text) < 2:
+            continue
+        # 先按**原句**判类型：时间短语被剥掉后，「明天下午比较 λ」会看不出是任务
+        kind = classify_text(clause)
+        project = match_project(t.data, text) or when_all
+        item = {
+            'id': new_id('t' if kind == 'task' else 'k'),
+            'type': kind,
+            'text': text,
+            'project': project['id'] if project else None,
+            'status': 'open' if kind == 'task' else 'new',
+            'due': None,
+            'due_raw': None,
+            'at': None,
+            'at_raw': None,
+            'created': iso(),
+            'updated': iso(),
+            'source': 'wechat',
+            'ev': t.ev,
+            'ev_part': index,
+            'history': [],
+        }
+        trailing = re.search(r'(之前|以前|前)$', when_raw or '')
+        parsed = parse_at(re.sub(r'(之前|以前|前)$', '', when_raw)) if when_raw else None
+        if when_raw and parsed is None:
+            # 认不出的时间（「这周」「本月底」）不能就这么丢了，原样并回正文
+            item['text'] = f'{when_raw}{text}'
+        if kind == 'task' and parsed:
+            # 有「必须到场」的动词，或者给了具体时段（明天下午）→ 发生
+            # 只有日期、或者「之前」→ 截止
+            needs_presence = EVENT_RE.search(text) and not DEADLINE_RE.search(text)
+            has_slot = bool(parsed.get('slot') or parsed.get('clock')) and not trailing
+            if (needs_presence and not trailing) or has_slot:
+                item['at'], item['at_raw'] = parsed, when_raw
+            else:
+                item['due'], item['due_raw'] = parsed['date'], when_raw
+        created.append(item)
+
+    if not created:
+        return t.reply
+
+    if not capture_has(t.ev):
+        capture_append({'at': t.args.at or iso(), 'text': body, 'urls': t.urls, 'ev': t.ev})
+
+    t.data['items'].extend(created)
+    t.data['cursor']['lastIngestAt'] = iso()
+    save(t.data)
+    render(t.data)
+    if len(created) == 1:
+        only = created[0]
+        project = find_project(t.data, only.get('project'))
+        others = [i for i in t.data['items'] if i['id'] != only['id']]
+        receipt = build_receipt(only, project['name'] if project else None,
+                                clash_with({'items': others}, only))
+    else:
+        receipt = build_multi_receipt(created, t.data)
+    t.reply.update(created=created[0]['id'], ids=[i['id'] for i in created], receipt=receipt)
+    return t.reply
+
+
+# 顺序即优先级：先认重投，再认答复，再判重复，最后才新建。
+TRIAGE_STEPS = (
+    _triage_cached,
+    _triage_uncertain_answer,
+    _triage_answer,
+    _triage_duplicates,
+    _triage_check_reply,
+    _triage_prepare,
+    _triage_plan,
+    _triage_announcement,
+    _triage_rules,
+)
+
+
 def cmd_triage(args) -> None:
     """收到消息就地分诊：分类、抽时间、归位、返回一句回执。
 
@@ -1107,246 +1405,36 @@ def cmd_triage(args) -> None:
     判断规则与 RULES.md §1 一致；agent 的定时分诊只是补漏，不是主路。
     """
     data = load()
-    raw = (args.text or "").strip()
-    reply = {"ok": True, "created": None, "receipt": ""}
+    raw = (args.text or '').strip()
     if args.validate_plan:
-        plan = json.load(sys.stdin)
-        journal_llm.validate(plan, raw, data['projects'])
+        journal_llm.validate(json.load(sys.stdin), raw, data['projects'])
         print(json.dumps({'ok': True}))
         return
+
+    reply = {'ok': True, 'created': None, 'receipt': ''}
     if not raw:
         print(json.dumps(reply, ensure_ascii=False))
         return
 
     urls = URL_RE.findall(raw)
-    rest = BOILER_RE.sub("", URL_RE.sub("", raw)).strip()
+    rest = BOILER_RE.sub('', URL_RE.sub('', raw)).strip()
     # 纯链接归碎片阅读服务，这边不出声（免得一次发送两条回执）
     if urls and not rest:
         print(json.dumps(reply, ensure_ascii=False))
         return
 
     ev = args.ev or ev_hash(raw, args.at)
-    previous = data.get('llm_triage', {}).get(ev)
-    if previous:
-        print(json.dumps({**previous, 'duplicate': True, 'receipt': repeated_receipt(data, ev)}, ensure_ascii=False))
-        return
-    answered = next((p for p in data.get('pending', []) if p.get('answer_ev') == ev), None)
-    if answered:
-        print(json.dumps({'ok':True,'duplicate':True,'answered':answered['id'],'receipt':'这条答复已保存，未重复处理。'},ensure_ascii=False))
-        return
-    existing = next((i for i in data["items"] if i.get("ev") == ev), None)
-    if not args.plan and not existing and len(active_questions(data)) > 1 and raw.strip('。！! ') in ('对','是','是的','不是','好','好的','先不做','第一个','第二个','第三个','1','2','3'):
-        if not capture_has(ev):
-            capture_append({'at':args.at or iso(),'text':raw,'urls':[],'ev':ev,'kind':'answer_uncertain'})
-        questions = active_questions(data)
-        print(json.dumps({'ok':True,'receipt':'答复原文已保存，但尚未修改任务：有多个待确认问题。请带上任务名或问题内容再回复。','uncertain':True},ensure_ascii=False))
-        return
-
-    # 有没答的待判时，短文本可能是在回答。但**必须字面真的对上**：
-    # 光"没有时间词"远远不够，否则一句「仓库还要优化」会被当成回答问题的答案。
-    if not args.plan and not existing and not urls and data.get("pending") and len(raw) <= 80:
-        target, score, ratio = match_pending(data, raw)
-        if target and score >= 2 and ratio >= 0.2:
-            target["answered"] = True
-            target["answer"] = raw
-            target["answered_at"] = iso()
-            target['answer_ev'] = ev
-            # 就算判成答复，原文也必须进证据层——判错了还能捞回来重放
-            if not capture_has(ev):
-                capture_append({"at": args.at or iso(), "text": rest or raw, "urls": [],
-                                "ev": ev, "kind": "answer"})
-            head = target["question"][:24]
-            receipt = f'已保存答复：{raw}（对应问题：{head}）。任务尚未修改，待核对。'
-            short = raw.strip().strip('。！!，, ')
-            choices = target.get('choices', [])
-            index = {'第一个':0,'第二个':1,'第三个':2,'1':0,'2':1,'3':2}.get(short)
-            choice = choices[index] if index is not None and index < len(choices) else next((c for c in choices if short == c['label'] or short in c.get('replies',[])),None)
-            if choice and choice.get('status'):
-                item = next((i for i in data['items'] if i['id'] == target.get('item')),None)
-                if item and item_revision(item) == target.get('item_revision'):
-                    stamp = iso()
-                    item.setdefault('history',[]).append({'at':stamp,'field':'status','from':item['status'],'to':choice['status'],'answer_ev':ev})
-                    item.update(status=choice['status'],updated=stamp)
-                    label = {'open':'记录','done':'已完成','parked':'已暂缓','dropped':'已放弃','new':'已保存','promoted':'已转为任务'}[choice['status']]
-                    receipt = f'已更新状态：「{item["text"]}」→ {label}。'
-                    target['applied'] = True
-                else:
-                    receipt = '已保存你的选择，但未修改任务：任务已在其他地方更新，请核对最新状态。'
-            target['receipt'] = receipt
-            save(data)
-            render(data)
-            reply.update(answered=target["id"],
-                         receipt=receipt)
-            print(json.dumps(reply, ensure_ascii=False))
+    triage = Triage(
+        data=data, raw=raw, rest=rest, urls=urls, ev=ev,
+        at=stamp_dt(args.at) or now(),
+        existing=next((i for i in data['items'] if i.get('ev') == ev), None),
+        args=args, reply=reply,
+    )
+    for step in TRIAGE_STEPS:
+        result = step(triage)
+        if result is not None:
+            print(json.dumps(result, ensure_ascii=False))
             return
-    if existing:
-        project = find_project(data, existing.get("project"))
-        reply.update(created=existing["id"], duplicate=True,
-                     receipt=repeated_receipt(data, ev))
-        print(json.dumps(reply, ensure_ascii=False))
-        return
-
-    # ev 只能挡住同一条原文；同一件事分几条消息发来时靠内容比一遍。
-    message_at = stamp_dt(args.at) or now()
-    semantic_dup = find_semantic_duplicate(data, raw, message_at)
-    if semantic_dup:
-        reply.update(created=semantic_dup["id"], duplicate=True,
-                     receipt=f'这条已存在，未重复添加：{semantic_dup["text"]}。')
-        print(json.dumps(reply, ensure_ascii=False))
-        return
-
-    if args.check_reply:
-        print(json.dumps({'needs_classification': True}))
-        return
-    if args.prepare:
-        if not capture_has(ev):
-            capture_append({'at': args.at or iso(), 'text': raw, 'urls': urls, 'ev': ev})
-        print(json.dumps({'needs_llm': True, 'ev': ev, 'text': raw,
-                          'received_at': args.at or iso(), 'timezone': 'Asia/Shanghai',
-                          'projects': project_list(data)}, ensure_ascii=False))
-        return
-    if args.plan:
-        plan = json.load(sys.stdin) if args.plan == '-' else json.loads(Path(args.plan).read_text(encoding='utf-8-sig'))
-        proposals, model = journal_llm.validate(plan, raw, data['projects'])
-
-        # 模型看不到账本里已有的条目，它给出的提议仍可能和旧记录重复。
-        skipped = []
-        kept = []
-        for proposal in proposals:
-            dup = find_semantic_duplicate(data, proposal['text'], message_at)
-            if dup:
-                skipped.append(dup)
-            else:
-                kept.append(proposal)
-        proposals = kept
-
-        if not proposals:
-            receipt = (f'这条已存在，未重复添加：{skipped[0]["text"]}。' if skipped
-                       else '原文已保存，没有新增记录。')
-            reply.update(created=None, ids=[], receipt=receipt, engine='llm', model=model)
-            data.setdefault('llm_triage', {})[ev] = reply
-            save(data)
-            print(json.dumps(reply, ensure_ascii=False))
-            return
-
-        stamp = iso()
-        created = []
-        for index, proposal in enumerate(proposals):
-            kind = proposal['type']
-            created.append({
-                'id': new_id('t' if kind == 'task' else 'k'), 'type': kind,
-                'text': proposal['text'], 'note': proposal['note'],
-                'project': proposal['project'], 'status': 'open' if kind == 'task' else 'new',
-                'due': proposal['due'], 'due_raw': proposal['time_quote'] if proposal['due'] else None,
-                'at': default_at(proposal['at']) if kind == 'task' else proposal['at'],
-                'at_raw': (proposal['time_quote'] if proposal['at'] else '今天') if kind == 'task' else None,
-                'place': proposal['place'], 'created': stamp, 'updated': stamp,
-                'source': 'wechat', 'ev': ev, 'ev_part': index, 'llm': model,
-                'quote': proposal['quote'],
-                'history': [{'at': stamp, 'field': 'text', 'from': raw, 'to': proposal['text'], 'by': 'llm'}],
-            })
-        if not capture_has(ev):
-            capture_append({'at': args.at or stamp, 'text': raw, 'urls': urls, 'ev': ev,
-                            **({'source_messages': plan['source_messages']} if 'source_messages' in plan else {})})
-        data['items'].extend(created)
-        data['cursor']['lastIngestAt'] = stamp
-        receipt = ''
-        if len(created) == 1:
-            project = find_project(data, created[0]['project'])
-            receipt = build_receipt(created[0], project['name'] if project else None,
-                                    clash_with({'items': [i for i in data['items'] if i.get('ev') != ev]}, created[0]))
-        elif created:
-            receipt = build_multi_receipt(created, data)
-        elif not urls:
-            receipt = '原文已保存，没有新增记录。'
-        reply.update(created=created[0]['id'] if created else None, ids=[i['id'] for i in created],
-                     receipt=receipt, engine='llm', model=model)
-        data.setdefault('llm_triage', {})[ev] = reply
-        save(data)
-        render(data)
-        print(json.dumps(reply, ensure_ascii=False))
-        return
-
-    # 通知/公告走另一条路：整份当成一次来源，只抽主事件和行动项，
-    # 不按句切——否则「各位同学大家好」会变成一条想法。
-    if is_announcement(rest or raw):
-        announced = build_announcement(rest or raw, ev, args.at or iso())
-        if announced:
-            if not capture_has(ev):
-                capture_append({"at": args.at or iso(), "text": rest or raw, "urls": urls, "ev": ev})
-            data["items"].extend(announced)
-            data["cursor"]["lastIngestAt"] = iso()
-            save(data)
-            render(data)
-            reply.update(created=announced[0]["id"], ids=[i["id"] for i in announced],
-                         receipt=build_announce_receipt(announced))
-            print(json.dumps(reply, ensure_ascii=False))
-            return
-
-    when_all = match_project(data, rest or raw)
-    created: list[dict] = []
-    for index, clause in enumerate(split_clauses(rest or raw)[:6]):
-        if URL_RE.fullmatch(clause):
-            continue
-        when_raw, body = extract_when(clause)
-        if len(body) < 2:
-            continue
-        # 先按**原句**判类型：时间短语被剥掉后，「明天下午比较 λ」会看不出是任务
-        kind = classify_text(clause)
-        project = match_project(data, body) or when_all
-        item = {
-            "id": new_id("t" if kind == "task" else "k"),
-            "type": kind,
-            "text": body,
-            "project": project["id"] if project else None,
-            "status": "open" if kind == "task" else "new",
-            "due": None,
-            "due_raw": None,
-            "at": None,
-            "at_raw": None,
-            "created": iso(),
-            "updated": iso(),
-            "source": "wechat",
-            "ev": ev,
-            "ev_part": index,
-            "history": [],
-        }
-        parsed = parse_at(re.sub(r"(之前|以前|前)$", "", when_raw)) if when_raw else None
-        if when_raw and parsed is None:
-            # 认不出的时间（「这周」「本月底」）不能就这么丢了，原样并回正文
-            body = f"{when_raw}{body}"
-            item["text"] = body
-        if kind == "task" and parsed:
-            # 有「必须到场」的动词，或者给了具体时段（明天下午）→ 发生
-            # 只有日期、或者「之前」→ 截止
-            needs_presence = EVENT_RE.search(body) and not DEADLINE_RE.search(body)
-            has_slot = bool(parsed.get("slot") or parsed.get("clock")) and not re.search(r"(之前|以前|前)$", when_raw)
-            if (needs_presence and not re.search(r"(之前|以前|前)$", when_raw)) or has_slot:
-                item["at"], item["at_raw"] = parsed, when_raw
-            else:
-                item["due"], item["due_raw"] = parsed["date"], when_raw
-        created.append(item)
-
-    if not created:
-        print(json.dumps(reply, ensure_ascii=False))
-        return
-
-    if not capture_has(ev):
-        capture_append({"at": args.at or iso(), "text": rest or raw, "urls": urls, "ev": ev})
-
-    data["items"].extend(created)
-    data["cursor"]["lastIngestAt"] = iso()
-    save(data)
-    render(data)
-    if len(created) == 1:
-        only = created[0]
-        project = find_project(data, only.get("project"))
-        others = [i for i in data["items"] if i["id"] != only["id"]]
-        receipt = build_receipt(only, project["name"] if project else None,
-                                clash_with({"items": others}, only))
-    else:
-        receipt = build_multi_receipt(created, data)
-    reply.update(created=created[0]["id"], ids=[i["id"] for i in created], receipt=receipt)
     print(json.dumps(reply, ensure_ascii=False))
 
 

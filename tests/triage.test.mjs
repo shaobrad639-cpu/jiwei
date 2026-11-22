@@ -14,10 +14,11 @@ function fixture(t) {
   for (const file of readdirSync('journal').filter((f) => f.endsWith('.py') || f === 'RULES.md')) {
     copyFileSync(join('journal', file), join(dir, file))
   }
-  const journal = (args, env = {}) => {
+  const journal = (args, env = {}, input) => {
     const result = spawnSync(python, [join(dir, 'journal.py'), ...args], {
       encoding: 'utf8',
       env: { ...process.env, JOURNAL_DIR: dir, ...env },
+      ...(input === undefined ? {} : { input }),
     })
     const line = String(result.stdout || '').trim().split(/\r?\n/).pop() || ''
     let payload = null
@@ -38,6 +39,11 @@ function fixture(t) {
     writeFileSync(file, JSON.stringify(data, null, 2))
   }
   return { dir, journal, state, backdate }
+}
+
+// 走 --plan 需要把 JSON 喂到 stdin
+function triageWith(journal, text, planJson) {
+  return journal(['triage', '--text', text, '--plan', '-'], {}, planJson).payload
 }
 
 function triage(journal, text, at = '') {
@@ -174,4 +180,76 @@ test('a paraphrase that still carries the time phrase is still a duplicate', (t)
   const again = triage(journal, '明天下午三点要给客户回个电话')
   assert.equal(again.duplicate, true, '带时间词的同义句也应当认作重复')
   assert.equal(state().items.length, 1)
+})
+
+// 下面几条锁住 cmd_triage 拆分后的各条去向，它们曾经都挤在同一个函数里。
+test('a long group notice becomes one event with time and place', (t) => {
+  const { journal, state } = fixture(t)
+  const notice = '各位同学大家好，本次海清志愿服务具体安排如下：将于11月28日上午9:00在'
+    + '【三教报告厅】举行动员会，请大家提前15分钟到场签到，届时会有老师讲解注意事项，请务必准时参加。'
+  triage(journal, notice)
+  const items = state().items
+  assert.equal(items.length, 1, '公告只该抽出一个主事件，不按句切')
+  assert.equal(items[0].text, '参加海清志愿服务')
+  assert.equal(items[0].at.clock, '09:00')
+  assert.equal(items[0].place, '三教报告厅')
+})
+
+test('a reply to a pending question is matched instead of becoming a new note', (t) => {
+  const { journal, state } = fixture(t)
+  const asked = journal(['ask', '--text', '周报要不要并入月报？',
+    '--choices-json', '[{"label":"并入"},{"label":"分开"}]']).payload
+  journal(['question-sent', '--id', asked.id])
+
+  const answer = triage(journal, '周报要不要并入月报？并入')
+  assert.equal(answer.answered, asked.id)
+  assert.match(answer.receipt, /已保存答复/)
+  assert.equal(state().items.length, 0, '答复不该被记成新条目')
+})
+
+test('the LLM plan path writes the proposed entries', (t) => {
+  const { journal, state } = fixture(t)
+  const plan = {
+    items: [{
+      type: 'task', text: '交季度报告', note: '', quote: '下周一交季度报告',
+      project: null, due: '2026-11-30', at: null, place: null, time_quote: '下周一',
+    }],
+    model: { provider: 'p', model: 'm' },
+  }
+  const result = triageWith(journal, '下周一交季度报告', JSON.stringify(plan))
+  assert.equal(result.engine, 'llm')
+  const items = state().items
+  assert.equal(items.length, 1)
+  assert.equal(items[0].text, '交季度报告')
+  assert.equal(items[0].due, '2026-11-30')
+})
+
+test('the LLM plan is filtered when it repeats an existing entry', (t) => {
+  const { journal, state } = fixture(t)
+  triage(journal, '明天交周报')
+  const plan = {
+    items: [{
+      type: 'task', text: '交周报', note: '', quote: '明天交周报',
+      project: null, due: null, at: null, place: null, time_quote: '明天',
+    }],
+    model: { provider: 'p', model: 'm' },
+  }
+  const result = triageWith(journal, '明天交周报', JSON.stringify(plan))
+  assert.equal(result.duplicate, true, '模型提议与旧记录重复时应当挡下')
+  assert.equal(state().items.length, 1)
+})
+
+test('--check-reply only classifies and never writes', (t) => {
+  const { journal, state } = fixture(t)
+  const result = journal(['triage', '--text', '随便一句话', '--check-reply']).payload
+  assert.equal(result.needs_classification, true)
+  assert.equal(state().items.length, 0)
+})
+
+test('a pure link is left to the reading inbox and stays silent', (t) => {
+  const { journal, state } = fixture(t)
+  const result = triage(journal, 'https://mp.weixin.qq.com/s/abc')
+  assert.equal(result.created, null)
+  assert.equal(result.receipt, '')
+  assert.equal(state().items.length, 0)
 })
