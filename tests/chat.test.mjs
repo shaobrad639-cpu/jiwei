@@ -268,7 +268,8 @@ test('WeChat routes chat, followups, explicit notes and mode changes; ingest exc
           ? { title: '第 1 期 · 这周收藏', intro: '这周攒了一篇。',
               sections: [{ heading: '金刚石铜冷板', body: '比纯铜低 3–5℃。', item_ids: ['it_1'] }],
               top_pick_id: 'it_1', top_pick_reason: '最具体' }
-          : { items: [{ type: 'task', text: '整理结果', note: '', quote: input.text, project: null, due: null, at: null, place: null, time_quote: null }] }
+          // 正文回显输入：固定成同一个词会让「换一句话说新的事」看起来像重复
+          : { items: [{ type: 'task', text: input.text.slice(0, 20), note: '', quote: input.text, project: null, due: null, at: null, place: null, time_quote: null }] }
       if (options.purpose === 'journal-classify') output = input.text.includes('周报')
         ? { intent: 'digest', continuation: false, collect_refs: false, reply: '', items: [] }
         : { intent: 'task', continuation: false, collect_refs: false, reply: '', items: output.items }
@@ -321,10 +322,12 @@ test('WeChat routes chat, followups, explicit notes and mode changes; ingest exc
   await receive('重新开始', '3')
   assert.equal(inputs.at(-1).input.history.length, 0)
   await receive('/退出聊天', 'stop')
-  await receive('整理结果', 'new-note')
+  // 换一个正文：同一段文字在 24 小时内再发一次会被语义去重挡下，
+  // 这里要验的是「退出聊天后普通消息重新进账本」，不是去重本身。
+  await receive('整理材料', 'new-note')
   assert.equal(journal(['state']).items.length, 2)
   const beforeRepeat = sent.length
-  await receive('整理结果', 'new-note')
+  await receive('整理材料', 'new-note')
   assert.equal(sent.length, beforeRepeat, '同一条消息重投时不应再发一遍回执')
   assert.equal(journal(['state']).items.length, 2)
   await receive('出个周报', 'digest-write')

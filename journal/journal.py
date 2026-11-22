@@ -25,6 +25,7 @@ import journal_llm
 
 import argparse
 import datetime as dt
+import difflib
 import hashlib
 import json
 import os
@@ -133,11 +134,19 @@ def stamp_local(stamp) -> str | None:
 
 
 def new_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:4]}"
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
-def ev_hash(at: str, text: str) -> str:
-    return hashlib.sha1(f"{at}\x00{text}".encode("utf-8")).hexdigest()[:16]
+def ev_hash(text: str, at: str | None = None) -> str:
+    """同一天内的同一段正文算同一条消息。
+
+    只用正文会让「交周报」这类每周重复的任务永远记不进来；只用完整时间戳
+    又会让同一条消息的两次投递算出两个 ev（旧实现的重复来源）。折中按
+    「本地日期 + 正文」算：同一天重投稳定命中，隔天自然成为新消息。
+    """
+    stamp = stamp_local(at) if at else None
+    day_key = stamp[:10] if stamp else day().isoformat()
+    return hashlib.sha1(f"{day_key}\x00{text}".encode("utf-8")).hexdigest()[:16]
 
 
 def parse_due(raw: str | None) -> str | None:
@@ -585,7 +594,7 @@ def cmd_ingest(args) -> None:
         text = (event.get('journal_text', event.get("text")) or "").strip()
         if not text:
             continue
-        key = event.get("journal_ev") or ev_hash(event.get("at", ""), text)
+        key = event.get("journal_ev") or ev_hash(text, event.get("at"))
         if key in seen:
             continue
         seen.add(key)
@@ -779,6 +788,73 @@ def repeated_receipt(data: dict, ev: str) -> str:
         project = find_project(data, items[0].get('project'))
         return build_receipt(items[0], project['name'] if project else None, duplicate=True)
     return build_multi_receipt(items, data, duplicate=True)
+
+
+SEMANTIC_THRESHOLD = 0.75
+# 只和最近一天内的条目比。同一件事被拆成几条消息发来，间隔通常只有几分钟；
+# 而「交周报」这种每周重复的任务必须能在下周重新记，不能永久被挡。
+SEMANTIC_WINDOW = dt.timedelta(hours=24)
+# 还活着的条目：任务的 open/parked、想法的 new/parked。
+# done 是已经做完的，dropped 是本人丢掉的，都不该拦住同一句话再来一次。
+LIVE_STATUSES = ("open", "parked", "new")
+
+
+def _normalize_text(text: str) -> str:
+    """只留汉字、字母、数字，去掉标点和空白，用于语义去重比较。"""
+    return re.sub(r'[^\u4e00-\u9fff\u0030-\u0039\u0041-\u005a\u0061-\u007a]', '', text or '')
+
+
+def _content_key(text: str) -> str:
+    """去掉时间说法后的内容骨架。
+
+    规则分诊会把「明天下午三点给客户回电话」落成条目「给客户回电话」，
+    而下一句「明天下午三点要给客户回个电话」还带着时间词。直接比原文和条目
+    只有 0.6 的相似度，比不过阈值，所以两边都先剥掉时间再比。
+    """
+    text = WHEN_RE.sub('', text or '')
+    text = SLOT_RE.sub('', text)
+    text = CLOCK_RE.sub('', text)
+    text = CN_CLOCK_RE.sub('', text)
+    return _normalize_text(text)
+
+
+def _similar(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left in right or right in left:
+        return True
+    return difflib.SequenceMatcher(None, left, right).ratio() >= SEMANTIC_THRESHOLD
+
+
+def find_semantic_duplicate(data: dict, raw: str, at: dt.datetime | None = None) -> dict | None:
+    """找与 raw 语义重复的近期条目，找不到返回 None。
+
+    同一件事常被拆成几条微信消息（「我把发票给你」/「报销」/「补进去」），
+    它们的时间戳不同、ev 也不同，只靠 ev 去重挡不住，于是同一件事会记两遍。
+    这里改比内容：原文和条目正文、引用各比一遍，含时间词的和不含时间词的
+    也各比一遍（见 _content_key），任一命中就算重复。
+
+    只看还活着的条目（见 LIVE_STATUSES），且只看 24 小时内新建的——
+    做完的和丢掉的该允许重来，隔了一周的同类任务（每周的「交周报」）也必须能重新记。
+    时间戳解析不了的条目一律跳过，宁可多记一条，也不要误挡。
+    """
+    variants = [key for key in (_normalize_text(raw), _content_key(raw)) if key]
+    if not variants:
+        return None
+    moment = at or now()
+    for item in data.get('items', []):
+        if item.get('status') not in LIVE_STATUSES:
+            continue
+        created = stamp_dt(item.get('created'))
+        if created is None or moment - created > SEMANTIC_WINDOW:
+            continue
+        for field in (item.get('text', ''), item.get('quote', '')):
+            others = [key for key in (_normalize_text(field), _content_key(field)) if key]
+            for left in variants:
+                for right in others:
+                    if _similar(left, right):
+                        return item
+    return None
 
 
 def capture_has(ev: str) -> bool:
@@ -1049,7 +1125,7 @@ def cmd_triage(args) -> None:
         print(json.dumps(reply, ensure_ascii=False))
         return
 
-    ev = args.ev or ev_hash(args.at or "", raw)
+    ev = args.ev or ev_hash(raw, args.at)
     previous = data.get('llm_triage', {}).get(ev)
     if previous:
         print(json.dumps({**previous, 'duplicate': True, 'receipt': repeated_receipt(data, ev)}, ensure_ascii=False))
@@ -1110,6 +1186,15 @@ def cmd_triage(args) -> None:
         print(json.dumps(reply, ensure_ascii=False))
         return
 
+    # ev 只能挡住同一条原文；同一件事分几条消息发来时靠内容比一遍。
+    message_at = stamp_dt(args.at) or now()
+    semantic_dup = find_semantic_duplicate(data, raw, message_at)
+    if semantic_dup:
+        reply.update(created=semantic_dup["id"], duplicate=True,
+                     receipt=f'这条已存在，未重复添加：{semantic_dup["text"]}。')
+        print(json.dumps(reply, ensure_ascii=False))
+        return
+
     if args.check_reply:
         print(json.dumps({'needs_classification': True}))
         return
@@ -1123,6 +1208,27 @@ def cmd_triage(args) -> None:
     if args.plan:
         plan = json.load(sys.stdin) if args.plan == '-' else json.loads(Path(args.plan).read_text(encoding='utf-8-sig'))
         proposals, model = journal_llm.validate(plan, raw, data['projects'])
+
+        # 模型看不到账本里已有的条目，它给出的提议仍可能和旧记录重复。
+        skipped = []
+        kept = []
+        for proposal in proposals:
+            dup = find_semantic_duplicate(data, proposal['text'], message_at)
+            if dup:
+                skipped.append(dup)
+            else:
+                kept.append(proposal)
+        proposals = kept
+
+        if not proposals:
+            receipt = (f'这条已存在，未重复添加：{skipped[0]["text"]}。' if skipped
+                       else '原文已保存，没有新增记录。')
+            reply.update(created=None, ids=[], receipt=receipt, engine='llm', model=model)
+            data.setdefault('llm_triage', {})[ev] = reply
+            save(data)
+            print(json.dumps(reply, ensure_ascii=False))
+            return
+
         stamp = iso()
         created = []
         for index, proposal in enumerate(proposals):
