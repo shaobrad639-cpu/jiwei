@@ -6,6 +6,9 @@
       config:
         dataDir: ''
         # journalDir: ''   # 省略则用 reading-inbox 同级的 journal/
+        # obsidian:
+        #   vault: '/Users/you/Documents/Obsidian Vault'   # 留空则不导出
+        #   folder: 'Weixin_Article_Analysis'
         chat:
           enabled: true
         llm:

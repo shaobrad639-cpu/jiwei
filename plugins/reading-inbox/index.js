@@ -453,7 +453,47 @@ async function pythonArticle(url, pythonOverride = '') {
           description: cleanTitle(data.description || ''),
           body: String(data.body),
           chars: Number(data.chars) || String(data.body).length,
+          author: cleanTitle(data.author || ''),
+          publishedAt: typeof data.publishedAt === 'string' ? data.publishedAt : '',
         })
+      },
+    )
+  })
+}
+
+/**
+ * Mirror one captured article into the Obsidian vault.
+ *
+ * Runs after the body lands in the inbox so a note never appears with an
+ * empty body. Failures are logged and reported on the item, never thrown:
+ * a missing vault must not break link capture.
+ */
+function pythonObsidian(python, { inbox, vault, folder, itemId }) {
+  return new Promise((resolve) => {
+    const args = [
+      join(HERE, 'tools', 'export_obsidian.py'),
+      '--inbox', inbox,
+      '--vault', vault,
+      '--folder', folder,
+    ]
+    if (itemId) args.push('--item', itemId)
+    execFile(
+      python,
+      args,
+      { timeout: 30000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        const line = String(stdout || '').trim().split(/\r?\n/).pop() || ''
+        let data = null
+        try {
+          data = JSON.parse(line)
+        } catch {
+          data = null
+        }
+        if (!data) {
+          resolve({ ok: false, error: `${error ? error.message : 'no output'} ${String(stderr || '').slice(0, 200)}`.trim() })
+          return
+        }
+        resolve(data)
       },
     )
   })
@@ -558,6 +598,15 @@ export function apply(ctx, config = {}) {
       ? config.journalDir.trim()
       : process.env.JOURNAL_DIR || join(HERE, '..', 'journal')
   llm.journalDir = journalDir
+  // 抓到正文后另存一份到 Obsidian 库；vault 为空表示不导出。
+  const obsidianVault =
+    typeof config.obsidian?.vault === 'string' && config.obsidian.vault.trim()
+      ? config.obsidian.vault.trim()
+      : ''
+  const obsidianFolder =
+    typeof config.obsidian?.folder === 'string' && config.obsidian.folder.trim()
+      ? config.obsidian.folder.trim()
+      : 'Weixin_Article_Analysis'
   // 微信里问“这篇收藏讲了什么”时，模型只有标题会答不了。带上最近几条的正文摘录。
   const CHAT_BODY_LIMIT = 3000
   const CHAT_READING_ITEMS = 3
@@ -1400,34 +1449,81 @@ export function apply(ctx, config = {}) {
    * instead of inferring it from a headline.
    */
   async function ensureBody(id, url) {
+    // An article that already has text may still lack the header fields the
+    // Obsidian note wants, so those are backfilled on a later pass.
     const wanted = await store.read((data) => {
       const item = data.items.find((entry) => entry.id === id)
-      return Boolean(item && !item.body && item.status !== 'dropped')
+      return Boolean(item && item.status !== 'dropped' && (!item.body || !item.author))
     })
     if (!wanted) return false
     const article = await pythonArticle(url, pythonOverride)
     if (!article) {
       await store.mutate((data) => {
         const item = data.items.find((entry) => entry.id === id)
-        if (item) item.bodyError = lastBodyError
+        if (item && !item.body) item.bodyError = lastBodyError
       })
       return false
     }
+    let changed = false
     await store.mutate((data) => {
       const item = data.items.find((entry) => entry.id === id)
-      if (!item || item.body) return
-      item.body = article.body.slice(0, BODY_LIMIT)
-      item.bodyChars = article.chars
-      item.bodyAt = new Date().toISOString()
-      delete item.bodyError
-      if (article.title && needsTitle(item)) {
-        item.title = article.title
-        item.titleResolved = true
+      if (!item) return
+      if (!item.body) {
+        item.body = article.body.slice(0, BODY_LIMIT)
+        item.bodyChars = article.chars
+        item.bodyAt = new Date().toISOString()
+        delete item.bodyError
+        if (article.title && needsTitle(item)) {
+          item.title = article.title
+          item.titleResolved = true
+        }
+        if (!item.summary && article.description) item.summary = article.description.slice(0, 500)
+        changed = true
       }
-      if (!item.summary && article.description) item.summary = article.description.slice(0, 500)
-      item.updatedAt = new Date().toISOString()
+      if (article.author && item.author !== article.author) {
+        item.author = article.author
+        changed = true
+      }
+      if (article.publishedAt && item.publishTime !== article.publishedAt) {
+        item.publishTime = article.publishedAt
+        changed = true
+      }
+      if (changed) item.updatedAt = new Date().toISOString()
     })
-    return true
+    if (changed) void syncObsidian(id)
+    return changed
+  }
+
+  /**
+   * Copy the freshly stored article into the Obsidian vault.
+   *
+   * Deliberately detached from the capture path: the note is a convenience,
+   * while the inbox write is the thing that must not fail.
+   */
+  async function syncObsidian(id) {
+    if (!obsidianVault) return
+    const python = await resolvePython(pythonOverride)
+    if (!python) {
+      log('obsidian: no python interpreter, skipped')
+      return
+    }
+    const result = await pythonObsidian(python, {
+      inbox: join(dataDir, 'inbox.json'),
+      vault: obsidianVault,
+      folder: obsidianFolder,
+      itemId: id,
+    })
+    if (result?.ok) {
+      const count = Array.isArray(result.written) ? result.written.length : 0
+      if (count) log(`obsidian: wrote ${count} note(s) for ${id}`)
+      return
+    }
+    const detail = result?.error || (result?.errors || [])[0]?.error || 'unknown error'
+    log(`obsidian: export failed for ${id}: ${String(detail).slice(0, 200)}`)
+    await store.mutate((data) => {
+      const item = data.items.find((entry) => entry.id === id)
+      if (item) item.obsidianError = String(detail).slice(0, 300)
+    }).catch(() => {})
   }
 
   const retryTimers = new Set()
@@ -1809,6 +1905,56 @@ ${pick}
         errors: lastMetaError ? [lastMetaError] : [],
         bodyErrors: lastBodyError ? [lastBodyError] : [],
       }
+    },
+  })
+
+  tool({
+    name: 'reading_export_obsidian',
+    description:
+      '把收件箱里已抓到正文的文章另存为 Obsidian 笔记。用户说“存到 Obsidian/我的笔记库”时调用；省略 id 则同步全部。',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '只导出这一条；省略则导出所有已有正文的条目。' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(args, value) {
+        if (!value.vault) {
+          return textBlock('未配置 Obsidian 库路径（config.obsidian.vault），没有导出任何文件。')
+        }
+        const written = Array.isArray(value.written) ? value.written : []
+        const skipped = Array.isArray(value.skipped) ? value.skipped : []
+        const removed = Array.isArray(value.removed) ? value.removed : []
+        const errors = Array.isArray(value.errors) ? value.errors : []
+        if (!written.length && !errors.length && !removed.length) {
+          return textBlock(`没有需要写入的笔记：${skipped.length} 篇已是最新。库：${value.vault}`)
+        }
+        const lines = [`写入 ${written.length} 篇，跳过 ${skipped.length} 篇，库：${value.vault}`]
+        for (const row of written.slice(0, 20)) lines.push(`· ${row.path}（${row.chars} 字）`)
+        for (const row of removed.slice(0, 10)) lines.push(`· 移除旧版本 ${row.path}`)
+        for (const row of errors.slice(0, 5)) lines.push(`· 失败 ${row.id || ''}：${row.error}`)
+        return textBlock(lines.join('\n'))
+      },
+    },
+    async execute(args) {
+      if (!obsidianVault) {
+        return { vault: '', written: [], skipped: [], errors: [] }
+      }
+      const python = await resolvePython(pythonOverride)
+      if (!python) {
+        return { vault: obsidianVault, written: [], skipped: [], errors: [{ error: '没有可用的 python' }] }
+      }
+      const id = pickString(args && args.id, 40)
+      const result = await pythonObsidian(python, {
+        inbox: join(dataDir, 'inbox.json'),
+        vault: obsidianVault,
+        folder: obsidianFolder,
+        itemId: id,
+      })
+      return { vault: obsidianVault, folder: obsidianFolder, ...result }
     },
   })
 

@@ -82,6 +82,26 @@ S1 可以很多，**S2 必须少**，S3 必须是自己写下来的话。
 
 晚间和周报模板调用 `reading_journal_review`，由 LLM 返回带逐字引用的发现、本子回应和下一步建议。工具只返回建议；Agent 继续通过原有 `evidence`、`notebook-review` 等命令保存，成功后才推送。`reading_journal_llm_status` 可查看模型服务和最近调用状态。
 
+## 公众号正文与 Obsidian
+
+转发进来的公众号文章会抓一次正文，存进 `inbox.json` 的 `body`，周报才有内容可摘要。正文里还会带上公众号名和发布时间，用于生成笔记标题。
+
+配好 `config.obsidian.vault` 后，每抓到一篇正文就顺手在库里写一篇 Markdown 笔记：
+
+```yaml
+- id: reading-inbox
+  config:
+    obsidian:
+      vault: '/Users/you/Documents/Obsidian Vault'
+      folder: 'Weixin_Article_Analysis'   # 省略则用这个默认值
+```
+
+文件名是 `YYYY-MM-DD_标题.md`，日期优先用发布时间，没有就用收录日期。笔记头部的 front matter 带 `title` / `source` / `author` / `publish_time` / `tags`。同一篇文章改了标题或日期会写到新文件名，旧文件按 `_sync-index.json` 自动删掉，不会在库里留两份。
+
+不配置 `vault` 就完全不导出。想手动补一次，在微信里说「存到 Obsidian」，或直接调 `reading_export_obsidian`。
+
+> 走本地代理（Clash/Surge 的 fake-IP 模式）时，公众号域名会解析到 `198.18.0.0/15`。抓取脚本把这个 RFC 2544 测试段当作公网目标放行，同时仍然拒绝 `127.0.0.1`、`10.0.0.0/8`、`192.168.0.0/16` 这类真正的内网地址。
+
 ## 保存结果如何反馈
 
 回执先说明实际结果，例如“已加入待办：整理结果”“已保存想法：调整实验方案”“已加入阅读收件箱：《文章标题》”。时间、截止、地点和关联项目会明确标注；没有项目的待办仍是已保存的待办，界面显示“未关联项目”。

@@ -19,6 +19,7 @@ import ipaddress
 import re
 import socket
 import sys
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import requests
@@ -71,6 +72,37 @@ def _title(page: str) -> str:
     return ""
 
 
+def _author(page: str) -> str:
+    """The official account shown in the article header."""
+    for pattern in (
+        r'id=["\']js_name["\'][^>]*>\s*([^<]{1,60})',
+        r'var\s+nickname\s*=\s*["\']([^"\']{1,60})["\']',
+        r'<meta[^>]+property=["\']og:article:author["\'][^>]+content=["\']([^"\']{1,60})["\']',
+    ):
+        found = _pick(pattern, page)
+        if found:
+            return found
+    return ""
+
+
+def _published(page: str) -> str:
+    """Publication time as ISO-8601 in +08:00, when the page carries one."""
+    for pattern in (
+        r'var\s+ct\s*=\s*["\'](\d{10})["\']',
+        r'var\s+create_time\s*=\s*["\'](\d{10})["\']',
+        r'"publish_time"\s*:\s*"?(\d{10})',
+    ):
+        match = re.search(pattern, page)
+        if not match:
+            continue
+        try:
+            stamp = datetime.fromtimestamp(int(match.group(1)), timezone(timedelta(hours=8)))
+        except (OverflowError, OSError, ValueError):
+            continue
+        return stamp.isoformat()
+    return ""
+
+
 # Everything after one of these belongs to the page chrome, not the article.
 BODY_END = ('<script', 'id="js_pc_qr_code"', 'class="rich_media_tool"', 'id="js_pc_qr_code"', 'id="js_temp_bottom_area"')
 
@@ -107,6 +139,23 @@ def _get(url: str, ua: str):
     )
 
 
+def _is_lan(addr) -> bool:
+    return (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_reserved or addr.is_multicast)
+
+
+def _is_fake_ip(addr) -> bool:
+    """198.18.0.0/15 is the RFC 2544 benchmark range.
+
+    Local proxy stacks (Clash/Surge fake-IP mode) answer DNS with an address
+    inside it and route the connection themselves, so a public name resolving
+    there is a normal internet target, not the LAN.
+    """
+    if addr.version != 4:
+        return False
+    return ipaddress.ip_address("198.18.0.0") <= addr <= ipaddress.ip_address("198.19.255.255")
+
+
 def _check_url(url: str) -> None:
     """Only public http(s) pages: a forwarded link must not reach the LAN."""
     parsed = urlparse(url)
@@ -115,9 +164,24 @@ def _check_url(url: str) -> None:
     host = parsed.hostname
     if not host:
         raise ValueError("链接缺少主机名")
+
+    # A literal address in the URL is judged as written.
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _is_lan(literal) and not _is_fake_ip(literal):
+            raise ValueError("拒绝抓取内网或回环地址")
+        return
+
+    lowered = host.lower().rstrip(".")
+    if lowered == "localhost" or lowered.endswith((".local", ".internal", ".localhost", ".home.arpa")):
+        raise ValueError("拒绝抓取内网或回环地址")
+
     for info in socket.getaddrinfo(host, None):
         addr = ipaddress.ip_address(info[4][0])
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast:
+        if _is_lan(addr) and not _is_fake_ip(addr):
             raise ValueError("拒绝抓取内网或回环地址")
 
 
@@ -157,6 +221,8 @@ def main(url: str) -> dict:
         ),
         "body": body[:BODY_LIMIT],
         "chars": len(body),
+        "author": _author(page),
+        "publishedAt": _published(page),
     }
 
 
