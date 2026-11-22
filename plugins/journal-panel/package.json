@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "任务/想法账本的可视化面板：项目分类可增删，条目可勾选。",
+  "description": "账本可视化面板：今天/待办/项目/本子/想法/活动六大视图，项目可增删、条目可勾选、支持热重载。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"

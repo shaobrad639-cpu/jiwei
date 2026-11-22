@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "微信碎片阅读收件箱：收集转发链接，每周整理成周报。",
+  "description": "微信碎片阅读收件箱：转发公众号/链接即收、抓正文、语义去重、可选同步 Obsidian；17 个 agent 工具。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
