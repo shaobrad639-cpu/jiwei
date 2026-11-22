@@ -270,3 +270,18 @@ export function compactItem(item) {
 export function sortItems(items) {
   return [...items].sort((a, b) => Date.parse(b.addedAt) - Date.parse(a.addedAt))
 }
+
+/** 上海本地时间的 ISO 串（带 +08:00）。
+
+ * 以前直接给模型 `new Date().toISOString()`，也就是 UTC。模型要自己换算
+ * 到 Asia/Shanghai，一旦算错就会把「今天」说成「明天」——07:28（上海）对应
+ * 23:28（UTC），日期正好差一天。这里直接把墙上时间给它，换算这一步取消。
+ */
+export function shanghaiNow(at = new Date()) {
+  return new Date(at.getTime() + 8 * 3600 * 1000).toISOString().replace('Z', '+08:00')
+}
+
+/** 上海本地的今天，YYYY-MM-DD。 */
+export function shanghaiDay(at = new Date()) {
+  return shanghaiNow(at).slice(0, 10)
+}

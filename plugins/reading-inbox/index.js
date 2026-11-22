@@ -35,7 +35,7 @@ import {
   parseWhen, guessTitle, extractPlace, cleanTitle,
   decodeEntities, countsOf, compactItem, sortItems,
 } from './util.js'
-import { invoiceMonth } from './util.js'
+import { invoiceMonth, shanghaiNow, shanghaiDay } from './util.js'
 
 /** 开票月份解析仍在包入口转出，保持对外契约不变。 */
 export { invoiceMonth }
@@ -486,7 +486,7 @@ export function apply(ctx, config = {}) {
       return { id: item.id, title: item.title || item.url, url: item.url, status: item.status,
         note: item.note || '', body: body.slice(0, take), body_chars: body.length }
     })
-    const draft = await llm.weeklyDigest({ items: payload, now: new Date().toISOString(), timezone: 'Asia/Shanghai' })
+    const draft = await llm.weeklyDigest({ items: payload, now: shanghaiNow(), today: shanghaiDay(), timezone: 'Asia/Shanghai' })
     const today = localDay()
     await store.mutate((data) => {
       data.digests = data.digests.filter((entry) => localDay(new Date(entry.createdAt)) !== today)

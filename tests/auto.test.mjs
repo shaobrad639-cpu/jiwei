@@ -89,6 +89,11 @@ test('default routing chats without writes, saves clear tasks/ideas once, and pr
   assert.deepEqual(f.journal(['state']).items.map(i => i.type), ['task', 'idea'])
   assert.equal(f.captures().length, 2)
   assert.ok(f.inputs.every(i => i.purpose === 'journal-classify'))
+  // 模型拿到的必须是上海墙上时间，不是 UTC：否则它会把「今天」算成「明天」
+  const payload = f.inputs.at(-1).input
+  assert.match(payload.now, /\+08:00$/, 'now 应当带 +08:00')
+  assert.equal(payload.timezone, 'Asia/Shanghai')
+  assert.equal(payload.today, payload.now.slice(0, 10), 'today 要和 now 的日期一致')
 })
 
 test('delivered clarification survives restart, uses original date/evidence, and commits only after confirmation', async t => {

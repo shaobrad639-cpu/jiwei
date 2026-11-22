@@ -8,6 +8,7 @@ import { JournalChat, chatCommand, chatSnapshot } from '../plugins/reading-inbox
 import { JournalLlm } from '../plugins/reading-inbox/llm.js'
 import { WeChatBot } from '../plugins/reading-inbox/wechat.js'
 import { apply } from '../plugins/reading-inbox/index.js'
+import { shanghaiNow, shanghaiDay } from '../plugins/reading-inbox/util.js'
 
 import { python } from './python.mjs'
 function fixture(t) {
@@ -380,4 +381,15 @@ test('a stopped listener does not dispatch messages that arrive after stop()', a
   release()    // 长轮询这时才带着消息返回
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.deepEqual(received, [], '停掉的实例不该再分发消息，否则会和新实例各回一遍')
+})
+
+// 以前把 new Date().toISOString() 直接当 now 给模型，也就是 UTC。上海 07:28
+// 对应 UTC 前一天 23:28，模型自己换算时算错了，把「今天」说成「明天」。
+test('shanghaiNow hands the model wall-clock time across the UTC date boundary', () => {
+  const utc = new Date('2026-11-22T23:28:56.571Z')
+  assert.equal(shanghaiNow(utc), '2026-11-23T07:28:56.571+08:00')
+  assert.equal(shanghaiDay(utc), '2026-11-23', 'UTC 还是 11-22，上海已经是 11-23')
+  // 不受运行机器本地时区影响
+  assert.equal(shanghaiDay(new Date('2026-11-23T15:59:59Z')), '2026-11-23')
+  assert.equal(shanghaiDay(new Date('2026-11-23T16:00:00Z')), '2026-11-24')
 })

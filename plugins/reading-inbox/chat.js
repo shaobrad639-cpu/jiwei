@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { extractUrls } from './wechat.js'
+import { shanghaiNow, shanghaiDay } from './util.js'
 
 const hash = text => createHash('sha256').update(text).digest('hex')
 const bareConfirmation = text => /^(?:对|是|是的|好|好的|确认|确定|可以|嗯|ok|yes)[。！!\s]*$/iu.test(text.trim())
@@ -161,7 +162,7 @@ export class JournalChat {
       const history = historyOf(state)
       const result = await this.llm.chat({ text: text.trim(), history,
         history_omitted_turns: state.turns.length - history.length,
-        journal: chatSnapshot(await this.context({ reading: true })), now: new Date().toISOString(), timezone: 'Asia/Shanghai' })
+        journal: chatSnapshot(await this.context({ reading: true })), now: shanghaiNow(), today: shanghaiDay(), timezone: 'Asia/Shanghai' })
       const turn = { id: requestId, text, reply: result.reply, model: result.model, at: new Date().toISOString() }
       state.turns = [...state.turns, turn].slice(-20)
       await this.save(key, state)
@@ -258,7 +259,7 @@ export class JournalChat {
       const history = historyOf(state)
       const urls = [...new Set([...(event.urls || []), ...(pending?.sources.flatMap(s => extractUrls(s.text)) || [])])]
       const classifyInput = { text, received_at: source.at, urls,
-        history, journal, rules, pending, now: new Date().toISOString(), timezone: 'Asia/Shanghai' }
+        history, journal, rules, pending, now: shanghaiNow(), today: shanghaiDay(), timezone: 'Asia/Shanghai' }
       let decision
       try {
         decision = await this.llm.classify(classifyInput)
