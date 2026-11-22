@@ -284,13 +284,15 @@ log(`  已写入 ${profilePatchPath}`)
 const schedulesDir = join(HERE, 'schedules')
 const readyPath = join(dataDir, '..', 'schedules-ready.md')
 log(`\n[5/5] 生成定时任务提示词`)
+let scheduleCount = 0
 if (existsSync(schedulesDir)) {
   const order = readdirSync(schedulesDir).filter((f) => f.endsWith('.md') && f !== 'README.md').sort()
+  scheduleCount = order.length
   const parts = [
     '# dsh-journal 定时任务（路径已填好）',
     '',
     '> 由 install.mjs 生成，占位符已替换成你机器上的真实路径。',
-    '> 把整个文件交给 agent，让它按每节开头的 `<!-- schedule -->` 建三个定时任务。',
+    `> 把整个文件交给 agent，让它按每节开头的 \`<!-- schedule -->\` 建 ${order.length} 个定时任务。`,
     '',
   ]
   for (const file of order) {
@@ -311,8 +313,8 @@ log(`
 装完了。还差三步（都必须手动）：
 
   1. 重启 DSH。插件的 HTTP 路由和面板只有重启后才挂载。
-  2. 建三个定时任务。把这句话发给 agent：
-       「读 ${readyPath}，按里面的 schedule 元信息建三个定时任务」
+  2. 建 ${scheduleCount} 个定时任务。把这句话发给 agent：
+       「读 ${readyPath}，按里面的 schedule 元信息建 ${scheduleCount} 个定时任务」
      没有它们，系统只有面板和消息通道，没有「晚间收口 / 每周压实」。
   3. 第一次用微信通道：左侧栏「碎片阅读」→ 接入微信 → 手机扫码。
 

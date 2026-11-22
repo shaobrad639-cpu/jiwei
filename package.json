@@ -1,6 +1,6 @@
 {
   "name": "jiwei",
-  "version": "0.1.0",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -15,12 +15,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/CRYPTOCHROME384/jiwei.git"
+    "url": "https://github.com/shaobrad639-cpu/jiwei.git"
   },
   "bugs": {
-    "url": "https://github.com/CRYPTOCHROME384/jiwei/issues"
+    "url": "https://github.com/shaobrad639-cpu/jiwei/issues"
   },
-  "homepage": "https://github.com/CRYPTOCHROME384/jiwei#readme",
+  "homepage": "https://github.com/shaobrad639-cpu/jiwei#readme",
   "keywords": [
     "dsh",
     "deepseek-harness",

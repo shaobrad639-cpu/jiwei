@@ -16,7 +16,7 @@
 ## 一键安装
 
 ```
-git clone https://github.com/CRYPTOCHROME384/jiwei.git
+git clone https://github.com/shaobrad639-cpu/jiwei.git
 cd jiwei
 node install.mjs
 ```
@@ -53,7 +53,7 @@ llm:
 
 一般无需填写 provider/model，保持默认即可跟随账本定时任务。需要固定某个模型时，两项必须同时指定；它们是 Harness 的注册 id。重新运行安装器时使用相同参数以保留选择。禁用后 `journal.py triage` 的正则路径照常可用。
 
-微信默认由一次模型调用完成意图分类与回复：明确的待办/想法保存，聊天直接回答，收藏链接交给阅读收件箱，不确定时提出一个确认问题。提议须先通过 Python 对类型、逐字引用、时间格式和已有项目的校验；保存成功后才生成操作回执。模型不能传入完成状态或创建项目。自动分类失败时不走规则补录，避免把聊天记进账本；`/记` 的明确记录请求仍有规则兜底，`--no-llm` 则恢复原来的规则记账。
+微信默认由一次模型调用完成意图分类与回复：明确的待办/想法保存，聊天直接回答，收藏链接交给阅读收件箱，不确定时提出一个确认问题。提议须先通过 Python 对类型、逐字引用、时间格式和已有项目的校验；保存成功后才生成操作回执。模型不能传入完成状态或创建项目。自动分类失败时**消息不会丢**：只要还没写过账本、且这条走的是自动分诊，就退回确定性的规则分诊再存一次，回执里说明存下了什么，并且不会再调用刚才失败的模型。`/发`、`/记` 这类命令的失败不会被当成记录；纯聊天模式的消息也不会被降级。`--no-llm` 则整条链路都用规则记账。
 
 晚间/周报使用 `reading_journal_review`（`mode=daily` 或 `weekly`，`limit` 默认 6）。返回内容是建议，尚未写入；Agent 必须先完整读取各页，再通过既有证据闸门保存。`coverage.next_offset` 非空要继续分页；`partial_source_ids` 表示仍需查看完整来源。上下文过长会明确失败，不静默丢弃。调用失败时，定时 Agent 按原流程读取上下文并核对，不能声称模型整理已经成功。
 
@@ -78,6 +78,28 @@ chat:
 
 诊断接口：`GET /reading-inbox/api/llm/status` 查看选定模型、选择来源、对应定时任务和可用模型目录；`POST /reading-inbox/api/llm/probe`（`Content-Type: application/json`，正文 `{}`）只用固定测试文本调用模型，不读取账本、不写聊天历史、不推送微信。
 
+## 公众号正文与 Obsidian
+
+转发进来的公众号文章会自动抓一次正文，存在 `inbox.json` 的 `body` 里。抓到之后可以顺手写一份 Markdown 笔记到 Obsidian 库——不配置就完全不导出，其他功能不受影响。
+
+在 `reading-inbox` 的 `config` 下加：
+
+```yaml
+obsidian:
+  vault: '/Users/you/Documents/Obsidian Vault'   # 库的根目录，不是子文件夹
+  folder: 'Weixin_Article_Analysis'              # 库内子目录，省略则用这个名字
+```
+
+`vault` 必须是你 Obsidian 库的根目录（含 `.obsidian/` 那一层）。`folder` 不存在会自动创建。
+
+写出来的文件名是 `YYYY-MM-DD_标题.md`，日期优先取文章发布时间，取不到才用收录日期。笔记头部 front matter 带 `title` / `source` / `author` / `publish_time` / `tags`，正文原样保留。
+
+同一篇文章如果后来改了标题或改了日期，会写到新文件名下，并按库里的 `_sync-index.json` 删掉旧文件，不会留两份。想手动补一次，在微信里说「存到 Obsidian」，或让 agent 调 `reading_export_obsidian`（不带参数就同步全部）。
+
+**抓不到正文怎么办。** 公众号会返回「环境异常」验证页，脚本会把这个情况原样报出来，不会存一段空正文。走本地代理（Clash/Surge 的 fake-IP 模式）时域名会解析到 `198.18.0.0/15`，这个 RFC 2544 测试段被当作公网目标放行；`127.0.0.1`、`10.0.0.0/8`、`192.168.0.0/16` 这类真正的内网地址仍然拒绝。
+
+排查接口：`GET /reading-inbox/api/debug` 会给出 `fetch_meta.py` 的路径、是否存在、当前解释器，以及最近一次抓取失败的原因。
+
 ## 项目关联目录
 
 项目的“浏览添加目录”可以选择工作区外的目录：使用“上一级”、用户目录/磁盘快捷入口，或输入完整路径（支持 `~/目录名`）后点“前往”，再点“添加当前目录”。未配置工作区时从用户目录开始。浏览不会更改目录关联，只有点击添加后才保存；一个项目可关联多个目录。
@@ -89,9 +111,13 @@ chat:
 3. 在 profile 的 `package.json` 里登记两个插件（dependency + bundle）
 4. 在 profile 的 `node_modules/@local/` 下建链接
 5. 在 profile 的 `cordis.patch.yml` 末尾写一段配置覆盖（写入 `dataDir`）
-6. 把 `schedules/` 里的三份模板填好路径，生成 `schedules-ready.md`
+6. 把 `schedules/` 里的四份模板填好路径，生成 `schedules-ready.md`
 
-第 3、5 步会先备份成 `*.dsh-journal.bak`。**幂等**，重复跑不会重复写。
+**幂等**，重复跑不会重复写。
+
+数据目录里的 `.py` 是**运行副本**，源码在 `journal/` 下。第 2 步覆盖前会先比内容：不一致就留一份 `.bak-<时间>`，并列出哪几个文件和仓库对不上。改代码请改 `journal/` 下的源文件——改运行副本的话，下次重跑安装器虽然不会丢，但会一直提示你不一致。
+
+第 3、5 步同样会先备份成 `*.dsh-journal.bak`。
 
 ## 建定时任务（必须）
 
@@ -99,15 +125,16 @@ chat:
 
 重启 DSH 后，把这句话发给 agent：
 
-> 读 `<数据目录上级>/schedules-ready.md`，按里面的 schedule 元信息建三个定时任务
+> 读 `<数据目录上级>/schedules-ready.md`，按里面的 schedule 元信息建四个定时任务
 
 装完时安装器会把完整路径打印出来，直接复制即可。
 
-三个任务：
+四个任务：
 
 | 任务 | 触发 | 作用 |
 | --- | --- | --- |
 | 微信兜底扫描 | 每天 13:00 | 插件分诊失败时补漏 |
+| 早间提要 | 每天 08:00 | 今天的安排，带时间与地点 |
 | 晚间收口 | 每天 22:30 | 语义收尾：关任务、更项目状态 |
 | 周报压实 | 周日 21:00 | 合并重复、改写四问、出周报 |
 
@@ -178,6 +205,7 @@ python <数据目录>/journal.py status
 | `/journal/api/state` 404 | 插件没加载；看 DSH 启动日志里的 `[journal-panel]` |
 | 微信消息没回执 | Python 没找到，或 `journalDir` 路径不对 |
 | 发送返回 `prepare failed` | 腾讯侧会话失效，重连或重新扫码 |
+| Obsidian 里没有笔记 | 没配 `config.obsidian.vault`，或这篇没抓到正文 |
 
 ## 升级
 
@@ -187,6 +215,8 @@ node install.mjs     # 会把新的 .py 同步进数据目录
 ```
 
 Python 代码会更新；已有 `RULES.md` 保留，升级后需自行对比仓库规则。账本数据只补缺，`store.json`、`capture/`、`projects/` 里已有的内容一律不动。
+
+如果数据目录里的 `.py` 被人改过（和仓库不一致），安装器会先留一份 `.bak-<时间>` 再覆盖，并打印出哪几个文件对不上。看到这个提示说明改错了位置——要改代码请改仓库 `journal/` 下的源文件。
 
 启用本次 LLM 功能后，还要让 Agent 用新生成的 `schedules-ready.md` **更新已有定时任务**；已有任务不会随模板文件自动更新。插件链接若指向旧的仓库位置，安装器会把链接更新到当前仓库；普通目录不会被覆盖。
 
@@ -207,4 +237,4 @@ plugin_manager set_plugin  target=include:reading-inbox  enabled=true
 
 代价：微信机器人断线重连几秒，期间到达的消息在重连后补收。
 
-需要重载的只有 `plugins/*/index.js`、`chat.js`、`llm.js` 这类代码；改 `schedules/*.md` 里的提示词不用——定时任务每次触发重新下发。`journal-panel` 同理，把 target 换成 `include:journal-panel`。
+需要重载的是 `plugins/*/` 下的所有 `.js`（`index.js`、`util.js`、`store.js`、`fetch.js`、`chat.js`、`llm.js`、`wechat.js`）和 `tools/*.py`；改 `schedules/*.md` 里的提示词不用——定时任务每次触发重新下发。`journal-panel` 同理，把 target 换成 `include:journal-panel`。
