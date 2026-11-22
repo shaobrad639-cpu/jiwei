@@ -152,15 +152,34 @@ if (!existsSync(rulesDst)) {
 
 // journal.py 及其模块也放进数据目录：插件按「数据目录里有 journal.py」调用，
 // 这样整个数据目录是自包含的，搬机器/备份只需要搬一个文件夹。
+//
+// 但数据目录里的这份是**运行副本**，源码在 journal/ 下。两边都能改，一旦
+// 有人（或某个 agent）改错了地方，直接覆盖就会把改动静默冲掉。所以先比对：
+// 内容不同就留一份 .bak-<时间> 再覆盖，并明确告诉用户改错了位置。
 const pyFiles = ['journal.py', 'journal_evidence.py', 'journal_sources.py', 'journal_notebook.py', 'journal_handoff.py', 'journal_llm.py']
+const sameText = (a, b) => a.replace(/\r\n/g, '\n') === b.replace(/\r\n/g, '\n')
+const backupStamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
 let copied = 0
+const drifted = []
 for (const file of pyFiles) {
   const src = join(HERE, 'journal', file)
   const dst = join(dataDir, file)
-  if (!args.dry) copyFileSync(src, dst)
+  const existed = existsSync(dst)
+  const changed = existed && !sameText(readText(src), readText(dst))
+  if (changed) drifted.push(file)
+  if (!args.dry) {
+    if (changed) copyFileSync(dst, `${dst}.bak-${backupStamp}`)
+    if (!existed || changed) copyFileSync(src, dst)
+  }
   copied += 1
 }
 log(`  ~ ${copied} 个 .py 已同步（git pull 后重跑本脚本即可更新）`)
+if (drifted.length) {
+  const verb = args.dry ? '将会备份' : `已备份为 .bak-${backupStamp}`
+  log(`  ! 数据目录里这 ${drifted.length} 个文件与仓库不同，${verb}：`)
+  for (const file of drifted) log(`      ${file}`)
+  log('    数据目录里的是运行副本。要改代码请改 journal/ 下的源文件，再重跑本脚本。')
+}
 
 /* ------------------------------------------------- 2. profile package.json */
 
