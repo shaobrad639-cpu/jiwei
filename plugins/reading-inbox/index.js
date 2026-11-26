@@ -5,7 +5,7 @@
  * tools the agent uses to curate them, and serves the small JSON API that the
  * Web UI panel reads.
  */
-import { mkdir, readFile, writeFile, rename, appendFile, unlink } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, appendFile, unlink, open, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
@@ -67,6 +67,35 @@ function claimIncoming(dataDir, key) {
 
 function releaseIncoming(dataDir, key) {
   incomingClaims(dataDir).delete(key)
+}
+
+/** 跨进程占位：同一句话在两个 DSH 实例之间也只能处理一次。 */
+function claimFile(dataDir, key) {
+  return join(dataDir, 'incoming-claims', `${createHash('sha256').update(key).digest('hex').slice(0, 24)}.claim`)
+}
+
+async function claimIncomingOnDisk(dataDir, key) {
+  const file = claimFile(dataDir, key)
+  await mkdir(join(dataDir, 'incoming-claims'), { recursive: true }).catch(() => {})
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const handle = await open(file, 'wx')
+      await handle.writeFile(String(Date.now()), 'utf8')
+      await handle.close()
+      return true
+    } catch (error) {
+      if (error.code !== 'EEXIST') return true
+      let expired = false
+      try { expired = Date.now() - (await stat(file)).mtimeMs > RECENT_INCOMING_MS } catch { expired = true }
+      if (!expired) return false
+      await unlink(file).catch(() => {})
+    }
+  }
+  return false
+}
+
+async function releaseIncomingOnDisk(dataDir, key) {
+  await unlink(claimFile(dataDir, key)).catch(() => {})
 }
 
 export function apply(ctx, config = {}) {
@@ -174,10 +203,16 @@ export function apply(ctx, config = {}) {
       // 按「同一个人 + 同一句话」占位：谁先拿到谁处理，另一个直接忽略。
       const sameWords = `${event.from}\u0000${event.text}`
       triageQueue = triageQueue.then(async () => {
-        if (!claimIncoming(dataDir, sameWords)) {
+        // 进程内先挡一次；两个 DSH 实例同时开着时，再靠文件占位挡一次。
+        const ignore = () => {
           event.journal_route = 'ignored'
           void bot.saveEvents()
           log('忽略重复投递的同一条消息')
+        }
+        if (!claimIncoming(dataDir, sameWords)) { ignore(); return }
+        if (!(await claimIncomingOnDisk(dataDir, sameWords))) {
+          releaseIncoming(dataDir, sameWords)
+          ignore()
           return
         }
         try {
@@ -185,6 +220,7 @@ export function apply(ctx, config = {}) {
         } catch (error) {
           // 没处理成不算占位，让微信重投或用户重发还能再试一次。
           releaseIncoming(dataDir, sameWords)
+          await releaseIncomingOnDisk(dataDir, sameWords)
           throw error
         }
       }, () => handleMessage(event))
@@ -2064,3 +2100,6 @@ ${pick}
     }),
   )
 }
+
+/** 仅供测试：跨进程占位读的是同一份文件，能在单测里验证。 */
+export const _testing = { claimIncomingOnDisk, releaseIncomingOnDisk }

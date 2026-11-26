@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { JournalChat } from '../plugins/reading-inbox/chat.js'
 import { JournalLlm } from '../plugins/reading-inbox/llm.js'
 import { WeChatBot } from '../plugins/reading-inbox/wechat.js'
-import { apply } from '../plugins/reading-inbox/index.js'
+import { apply, _testing } from '../plugins/reading-inbox/index.js'
 
 import { python } from './python.mjs'
 const model = { provider: 'configured', model: 'm' }
@@ -489,4 +489,14 @@ test('two plugin instances answer the same message only once', async t => {
   await Promise.all(bots.map(b => b.handleMessage(msg)))
   assert.equal(bots.length, 2, '两个实例都该收到这条消息')
   assert.equal(sent.length, 1, '两个实例只该回一条')
+})
+
+// 两个 DSH 实例同时开着时各有一个进程，进程内占位管不到对方；文件占位负责这一层。
+test('the on-disk claim lets only one process handle the same words', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'claims-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  assert.equal(await _testing.claimIncomingOnDisk(dir, 'owner\u0000今天日程'), true)
+  assert.equal(await _testing.claimIncomingOnDisk(dir, 'owner\u0000今天日程'), false, '第二个进程应被挡下')
+  await _testing.releaseIncomingOnDisk(dir, 'owner\u0000今天日程')
+  assert.equal(await _testing.claimIncomingOnDisk(dir, 'owner\u0000今天日程'), true, '释放后能重新处理')
 })
