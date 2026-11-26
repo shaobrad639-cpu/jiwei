@@ -76,6 +76,8 @@ export function apply(ctx, config = {}) {
   const reminderLead = Number.isFinite(config.reminder?.leadMinutes) && config.reminder.leadMinutes > 0
     ? Math.round(config.reminder.leadMinutes)
     : DEFAULT_LEAD_MINUTES
+  // 早间提要：默认插件自己发；已交给「每日早晨事项提醒」定时任务时设 morning.enabled: false。
+  const morningEnabled = config.morning?.enabled !== false
   // 微信里问“这篇收藏讲了什么”时，模型只有标题会答不了。带上最近几条的正文摘录。
   const CHAT_BODY_LIMIT = 3000
   const CHAT_READING_ITEMS = 3
@@ -610,6 +612,7 @@ export function apply(ctx, config = {}) {
   }
 
   async function maybeSendMorningBrief() {
+    if (!morningEnabled) return
     const now = new Date()
     const day = localDay(now)
     const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }).format(now))
@@ -1990,7 +1993,12 @@ ${pick}
       }
 
       if (req.method === 'GET' && path === '/reading-inbox/api/health') {
-        return sendJson(res, 200, { ok: true, dataDir, items: (await store.read((data) => data.items.length)) })
+        return sendJson(res, 200, {
+          ok: true, dataDir, items: (await store.read((data) => data.items.length)),
+          // 配置到底生效没有，看这里最快：插件重载和 DSH 重启后都能核对。
+          morning: morningEnabled,
+          reminder: { enabled: reminderEnabled, leadMinutes: reminderLead },
+        })
       }
 
       return sendJson(res, 404, { error: 'not found' })
