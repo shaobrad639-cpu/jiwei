@@ -108,6 +108,9 @@ export function apply(ctx, config = {}) {
     } catch (error) { throw Object.assign(new Error('未能读取账本上下文'), { code: 'JOURNAL_CONTEXT_FAILED', cause: error }) }
   } })
   let triageQueue = Promise.resolve()
+  // 微信重投有时换一个 message_id；同一个人 90 秒内说了同一句话，按重投处理。
+  const recentIncoming = new Map()
+  const RECENT_INCOMING_MS = 90 * 1000
   ctx.inject(['llm'], (modelCtx) => {
     llm.runtime = modelCtx.llm
     llm.status.available = true
@@ -142,8 +145,25 @@ export function apply(ctx, config = {}) {
         log('忽略非绑定用户的微信消息')
         return
       }
-      // One message at a time preserves ordering, including short question replies.
-      triageQueue = triageQueue.then(() => handleMessage(event), () => handleMessage(event))
+      // 微信重投有时会换一个 message_id，只按 id 判重挡不住；同一个人 90 秒内
+      // 说了同一句话，按重投处理，别让模型再跑一遍、再回一遍。
+      const sameWords = `${event.from}\u0000${event.text}`
+      triageQueue = triageQueue.then(async () => {
+        const seen = recentIncoming.get(sameWords)
+        if (seen && Date.now() - seen < RECENT_INCOMING_MS) {
+          event.journal_route = 'ignored'
+          void bot.saveEvents()
+          log('忽略重复投递的同一条消息')
+          return
+        }
+        const result = await handleMessage(event)
+        recentIncoming.set(sameWords, Date.now())
+        if (recentIncoming.size > 200) {
+          const keepAfter = Date.now() - RECENT_INCOMING_MS * 4
+          for (const [text, when] of recentIncoming) if (when < keepAfter) recentIncoming.delete(text)
+        }
+        return result
+      }, () => handleMessage(event))
       return triageQueue
     },
   })

@@ -393,3 +393,18 @@ test('shanghaiNow hands the model wall-clock time across the UTC date boundary',
   assert.equal(shanghaiDay(new Date('2026-11-23T15:59:59Z')), '2026-11-23')
   assert.equal(shanghaiDay(new Date('2026-11-23T16:00:00Z')), '2026-11-24')
 })
+
+// 新实例接管后，旧实例可能在 stop() 之前就把这批更新收下来了；已经停止的实例
+// 必须在分发前再挡一次，否则同一条消息会被新旧两个实例各回一遍。
+test('a stopped bot ignores messages that were already fetched', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'wechat-stopped-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const received = []
+  const bot = new WeChatBot({ dir, onMessage: event => { received.push(event.text) } })
+  bot.credential = { ilink_user_id: 'u1' }
+  bot.stop()
+  bot.handleMessage({ from_user_id: 'u1', message_id: 'm2',
+    item_list: [{ type: 1, text_item: { text: '今天日程' } }] })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(received, [], '已经停掉的实例不能再处理旧批次里的消息')
+})

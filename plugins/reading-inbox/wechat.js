@@ -186,6 +186,8 @@ export class WeChatBot {
     this.status = 'idle'
     this.error = ''
     this.lastMessageAt = 0
+    // 热重载/重连时旧实例可能在 stop() 之后才收到上一批更新；停掉的不许再分发。
+    this.stopped = false
   }
 
   snapshot() {
@@ -311,6 +313,7 @@ export class WeChatBot {
 
   async connect() {
     if (!this.credential) return this.snapshot()
+    this.stopped = false
     this.status = 'connected'
     this.startListening()
     return this.snapshot()
@@ -376,6 +379,10 @@ export class WeChatBot {
   }
 
   handleMessage(msg) {
+    if (this.stopped) {
+      this.log('实例已停止，忽略这条消息')
+      return
+    }
     if (msg.from_user_id === this.credential?.ilink_user_id && typeof msg.context_token === 'string' && msg.context_token) {
       this.contextTokens.set(msg.from_user_id, msg.context_token)
     }
@@ -557,6 +564,7 @@ export class WeChatBot {
   }
 
   stop() {
+    this.stopped = true
     if (this.listenAbort) {
       this.listenAbort.abort()
       this.listenAbort = null

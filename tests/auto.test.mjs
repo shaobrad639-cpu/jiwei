@@ -432,3 +432,30 @@ test('an answer-only receipt is also sent once on redelivery', async t => {
   assert.equal(sent.length, 1, '同一条消息重投只回一次')
   assert.match(sent[0], /已存在/)
 })
+
+// 微信重投有时会换一个 message_id：同一个人 90 秒内说同一句话，只回一次。
+test('the same words with a new message id count as a redelivery', async t => {
+  const f = fixture(t)
+  let bot
+  const sent = []
+  const originalLoad = WeChatBot.prototype.load
+  const originalSend = WeChatBot.prototype.sendText
+  WeChatBot.prototype.load = async function () { bot = this; this.credential = { ilink_user_id: 'owner' } }
+  WeChatBot.prototype.sendText = async function (text) { sent.push(text) }
+  t.after(() => { WeChatBot.prototype.load = originalLoad; WeChatBot.prototype.sendText = originalSend })
+  const cleanup = []
+  const ctx = {
+    llm: f.runtime, agentDefaultModel: { currentSelection: () => model }, agents: { currentInitiator: () => undefined },
+    tools: { register() { return () => {} } }, webServer: { register() { return () => {} } },
+    inject(_names, fn) { fn(this) }, on() {},
+    effect(fn) { const dispose = fn(); if (typeof dispose === 'function') cleanup.push(dispose) },
+  }
+  t.after(() => cleanup.reverse().forEach(fn => fn()))
+  apply(ctx, { dataDir: join(f.dir, 'inbox'), journalDir: f.dir, python })
+  f.output(decision('chat', [], '收到。'))
+  const receive = (text, id) => bot.handleMessage({ from_user_id: 'owner', message_id: id,
+    item_list: [{ type: 1, text_item: { text } }] })
+  await receive('今天日程', 'id-a')
+  await receive('今天日程', 'id-b')
+  assert.equal(sent.length, 1, '换了 message_id 的同一句话也只回一次')
+})
