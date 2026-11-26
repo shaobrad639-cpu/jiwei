@@ -459,3 +459,34 @@ test('the same words with a new message id count as a redelivery', async t => {
   await receive('今天日程', 'id-b')
   assert.equal(sent.length, 1, '换了 message_id 的同一句话也只回一次')
 })
+
+// 热重载瞬间新旧两个实例可能同时收到同一条消息；同一个人同一句话只该被处理一次。
+test('two plugin instances answer the same message only once', async t => {
+  const f = fixture(t)
+  const bots = []
+  const sent = []
+  const originalLoad = WeChatBot.prototype.load
+  const originalSend = WeChatBot.prototype.sendText
+  WeChatBot.prototype.load = async function () { bots.push(this); this.credential = { ilink_user_id: 'owner' } }
+  WeChatBot.prototype.sendText = async function (text) {
+    await new Promise(resolve => setTimeout(resolve, 30))
+    sent.push(text)
+  }
+  t.after(() => { WeChatBot.prototype.load = originalLoad; WeChatBot.prototype.sendText = originalSend })
+  const cleanup = []
+  const makeCtx = () => ({
+    llm: f.runtime, agentDefaultModel: { currentSelection: () => model }, agents: { currentInitiator: () => undefined },
+    tools: { register() { return () => {} } }, webServer: { register() { return () => {} } },
+    inject(_names, fn) { fn(this) }, on() {},
+    effect(fn) { const dispose = fn(); if (typeof dispose === 'function') cleanup.push(dispose) },
+  })
+  t.after(() => cleanup.reverse().forEach(fn => fn()))
+  apply(makeCtx(), { dataDir: join(f.dir, 'inbox'), journalDir: f.dir, python })
+  apply(makeCtx(), { dataDir: join(f.dir, 'inbox'), journalDir: f.dir, python })
+  f.output(decision('chat', [], '收到。'))
+  const msg = { from_user_id: 'owner', message_id: 'm-same',
+    item_list: [{ type: 1, text_item: { text: '今天日程' } }] }
+  await Promise.all(bots.map(b => b.handleMessage(msg)))
+  assert.equal(bots.length, 2, '两个实例都该收到这条消息')
+  assert.equal(sent.length, 1, '两个实例只该回一条')
+})

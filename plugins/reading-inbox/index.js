@@ -41,6 +41,34 @@ import { invoiceMonth, shanghaiNow, shanghaiDay } from './util.js'
 /** 开票月份解析仍在包入口转出，保持对外契约不变。 */
 export { invoiceMonth }
 
+/** 同一个人 90 秒内说同一句话只处理一次：微信重投可能换 message_id，热重载时
+ *  新旧实例也可能同时收到。占位表挂在 globalThis 上、按数据目录隔离，跨实例共用。 */
+const INCOMING_CLAIMS = Symbol.for('dsh.reading-inbox.incoming-claims')
+const RECENT_INCOMING_MS = 90 * 1000
+
+function incomingClaims(dataDir) {
+  const root = globalThis[INCOMING_CLAIMS] || (globalThis[INCOMING_CLAIMS] = new Map())
+  let map = root.get(dataDir)
+  if (!map) { map = new Map(); root.set(dataDir, map) }
+  return map
+}
+
+function claimIncoming(dataDir, key) {
+  const map = incomingClaims(dataDir)
+  const nowMs = Date.now()
+  const seen = map.get(key)
+  if (seen && nowMs - seen < RECENT_INCOMING_MS) return false
+  map.set(key, nowMs)
+  if (map.size > 200) {
+    for (const [text, when] of map) if (nowMs - when > RECENT_INCOMING_MS * 4) map.delete(text)
+  }
+  return true
+}
+
+function releaseIncoming(dataDir, key) {
+  incomingClaims(dataDir).delete(key)
+}
+
 export function apply(ctx, config = {}) {
   const pythonOverride = typeof config.python === 'string' ? config.python.trim() : ''
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
@@ -108,9 +136,6 @@ export function apply(ctx, config = {}) {
     } catch (error) { throw Object.assign(new Error('未能读取账本上下文'), { code: 'JOURNAL_CONTEXT_FAILED', cause: error }) }
   } })
   let triageQueue = Promise.resolve()
-  // 微信重投有时换一个 message_id；同一个人 90 秒内说了同一句话，按重投处理。
-  const recentIncoming = new Map()
-  const RECENT_INCOMING_MS = 90 * 1000
   ctx.inject(['llm'], (modelCtx) => {
     llm.runtime = modelCtx.llm
     llm.status.available = true
@@ -145,24 +170,23 @@ export function apply(ctx, config = {}) {
         log('忽略非绑定用户的微信消息')
         return
       }
-      // 微信重投有时会换一个 message_id，只按 id 判重挡不住；同一个人 90 秒内
-      // 说了同一句话，按重投处理，别让模型再跑一遍、再回一遍。
+      // 微信重投有时会换一个 message_id，旧实例也可能和新实例同时收到同一条。
+      // 按「同一个人 + 同一句话」占位：谁先拿到谁处理，另一个直接忽略。
       const sameWords = `${event.from}\u0000${event.text}`
       triageQueue = triageQueue.then(async () => {
-        const seen = recentIncoming.get(sameWords)
-        if (seen && Date.now() - seen < RECENT_INCOMING_MS) {
+        if (!claimIncoming(dataDir, sameWords)) {
           event.journal_route = 'ignored'
           void bot.saveEvents()
           log('忽略重复投递的同一条消息')
           return
         }
-        const result = await handleMessage(event)
-        recentIncoming.set(sameWords, Date.now())
-        if (recentIncoming.size > 200) {
-          const keepAfter = Date.now() - RECENT_INCOMING_MS * 4
-          for (const [text, when] of recentIncoming) if (when < keepAfter) recentIncoming.delete(text)
+        try {
+          return await handleMessage(event)
+        } catch (error) {
+          // 没处理成不算占位，让微信重投或用户重发还能再试一次。
+          releaseIncoming(dataDir, sameWords)
+          throw error
         }
-        return result
       }, () => handleMessage(event))
       return triageQueue
     },
