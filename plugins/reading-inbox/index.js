@@ -17,6 +17,7 @@ import { WeChatBot, extractUrls } from './wechat.js'
 import { JournalLlm, triageMessage, chatErrorMessage, modelErrorCode } from './llm.js'
 import { JournalChat, chatCommand } from './chat.js'
 import { sweepAttachments } from './attachments.js'
+import { dueReminders, reminderText, DEFAULT_LEAD_MINUTES } from './reminders.js'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 
@@ -68,6 +69,13 @@ export function apply(ctx, config = {}) {
     typeof config.obsidian?.folder === 'string' && config.obsidian.folder.trim()
       ? config.obsidian.folder.trim()
       : 'Weixin_Article_Analysis'
+  // 存进 Obsidian 之后要不要在微信里回一条「已存入」，默认开（config.obsidian.notify: false 关掉）。
+  const obsidianNotify = config.obsidian?.notify !== false
+  // 行程提醒：具体到小时的安排提前一小时推到微信；config.reminder.leadMinutes 改默认提前量。
+  const reminderEnabled = config.reminder?.enabled !== false
+  const reminderLead = Number.isFinite(config.reminder?.leadMinutes) && config.reminder.leadMinutes > 0
+    ? Math.round(config.reminder.leadMinutes)
+    : DEFAULT_LEAD_MINUTES
   // 微信里问“这篇收藏讲了什么”时，模型只有标题会答不了。带上最近几条的正文摘录。
   const CHAT_BODY_LIMIT = 3000
   const CHAT_READING_ITEMS = 3
@@ -606,6 +614,8 @@ export function apply(ctx, config = {}) {
     const day = localDay(now)
     const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }).format(now))
     if (hour < 8 || hour > 9 || morningSentFor === day) return
+    // 微信没连上就发不出去，等连上再发；也避免测试里把假通道当成真通道。
+    if (bot.status !== 'connected') return
     // 插件重载会把内存状态清掉；以文件为准，避免重载后又发一遍。
     if (await morningSentToday(day)) { morningSentFor = day; return }
     morningSentFor = day
@@ -628,6 +638,67 @@ export function apply(ctx, config = {}) {
     void maybeSendMorningBrief()
     const timer = setInterval(() => { void maybeSendMorningBrief() }, 60 * 1000)
     return () => clearInterval(timer)
+  })
+
+  // 行程提醒：下午 3 点半的会，2 点半推一条到微信。
+  // 只认具体到小时的安排（at.clock），上午/下午这种粗时段留给早间提要。
+  const REMINDER_STATE = join(dataDir, 'reminders.json')
+  const REMINDER_KEEP_DAYS = 30
+  async function readReminderState() {
+    try {
+      const parsed = JSON.parse(await readFile(REMINDER_STATE, 'utf8'))
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch { return {} }
+  }
+  async function writeReminderState(state) {
+    await mkdir(dataDir, { recursive: true })
+    const tmp = `${REMINDER_STATE}.${process.pid}.tmp`
+    await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+    await rename(tmp, REMINDER_STATE)
+  }
+
+  let remindersRunning = false
+  async function maybeSendReminders() {
+    if (!reminderEnabled || remindersRunning) return
+    // 微信没连上就别跑：发不出去，还会每分钟白起一个 Python。
+    if (bot.status !== 'connected') return
+    remindersRunning = true
+    try {
+      const snapshot = await journalCommand(['chat-context'])
+      const sent = await readReminderState()
+      const now = new Date()
+      const due = dueReminders(snapshot.items, now, sent, { fallbackLead: reminderLead })
+      if (!due.length) return
+      let changed = false
+      for (const entry of due) {
+        try {
+          await bot.sendText(reminderText(entry, now))
+        } catch (error) {
+          log(`行程提醒发送失败：${String(error?.message || error).slice(0, 200)}`)
+          continue
+        }
+        sent[entry.key] = new Date().toISOString()
+        changed = true
+        log(`已提醒：${entry.item.text}（提前 ${entry.lead} 分钟）`)
+      }
+      if (!changed) return
+      // 状态文件只留一个月，别越滚越大。
+      const cutoff = Date.now() - REMINDER_KEEP_DAYS * 86400000
+      for (const [key, stamp] of Object.entries(sent)) {
+        if (!(Date.parse(stamp) >= cutoff)) delete sent[key]
+      }
+      await writeReminderState(sent)
+    } catch (error) {
+      log(`行程提醒检查失败：${String(error?.message || error).slice(0, 200)}`)
+    } finally {
+      remindersRunning = false
+    }
+  }
+  ctx.effect(() => {
+    // 插件刚起来时微信还在连，20 秒后再看第一眼，之后每分钟一次。
+    const kickoff = setTimeout(() => { void maybeSendReminders() }, 20 * 1000)
+    const timer = setInterval(() => { void maybeSendReminders() }, 60 * 1000)
+    return () => { clearTimeout(kickoff); clearInterval(timer) }
   })
 
   // 附件只留一小时；发票例外，长期可查。
@@ -890,7 +961,19 @@ export function apply(ctx, config = {}) {
       : Promise.resolve(result.item.title)
     if (input.source === 'wechat' && input.acknowledge !== false) void ackCaptured(titlePromise, result)
     else void titlePromise.catch(error => log(`资料标题更新失败：${error.code || error.name || 'unknown'}`))
+    // 转发进来的链接不该等用户开口才读正文、才进笔记库：后台补正文，
+    // ensureBody 写完正文会自己调 syncObsidian，存好后 notifyObsidianSaved 回一条通知。
+    if (obsidianVault) void autoStoreLater(result.item.id, result.item.url)
     return result
+  }
+
+  /** 后台补正文并同步 Obsidian：出错只记日志，不能影响收录回执。 */
+  async function autoStoreLater(id, url) {
+    try {
+      await ensureBody(id, url)
+    } catch (error) {
+      log(`obsidian: 后台补正文失败 ${String(error?.message || error).slice(0, 200)}`)
+    }
   }
 
   /** Short WeChat receipt so the user knows the link landed. */
@@ -1005,8 +1088,11 @@ export function apply(ctx, config = {}) {
       itemId: id,
     })
     if (result?.ok) {
-      const count = Array.isArray(result.written) ? result.written.length : 0
-      if (count) log(`obsidian: wrote ${count} note(s) for ${id}`)
+      const written = Array.isArray(result.written) ? result.written : []
+      if (written.length) {
+        log(`obsidian: wrote ${written.length} note(s) for ${id}`)
+        void notifyObsidianSaved(id, written)
+      }
       return
     }
     const detail = result?.error || (result?.errors || [])[0]?.error || 'unknown error'
@@ -1015,6 +1101,40 @@ export function apply(ctx, config = {}) {
       const item = data.items.find((entry) => entry.id === id)
       if (item) item.obsidianError = String(detail).slice(0, 300)
     }).catch(() => {})
+  }
+
+  /**
+   * 收链接时微信只回了「已收下」，存进 Obsidian 是后台悄悄做的，
+   * 用户看不到成没成。文件真写进库之后单独回一条，带文件名，好核对。
+   * 同一篇重复写入（正文刷新会重导）不重复打扰。
+   */
+  async function notifyObsidianSaved(id, written) {
+    if (!obsidianNotify) return
+    const first = (Array.isArray(written) && written[0]) || null
+    const name = String((first && first.path) || first || '').split('/').pop()
+    let fresh = null
+    try {
+      fresh = await store.mutate((data) => {
+        const item = data.items.find((entry) => entry.id === id)
+        if (!item) return null
+        const first = item.obsidianFile !== name
+        item.obsidianFile = name
+        item.obsidianAt = new Date().toISOString()
+        delete item.obsidianError
+        return first ? { title: item.title || item.url || '这篇文章', name } : null
+      })
+    } catch (error) {
+      log(`obsidian: 记录写入状态失败 ${String(error?.message || error).slice(0, 200)}`)
+      return
+    }
+    if (!fresh) return
+    try {
+      const lines = [`✅ 已存入 Obsidian：《${fresh.title}》`]
+      if (fresh.name) lines.push(`文件：${obsidianFolder}/${fresh.name}`)
+      await bot.sendText(lines.join('\n'))
+    } catch (error) {
+      log(`obsidian: 通知发送失败 ${String(error?.message || error).slice(0, 200)}`)
+    }
   }
 
   const retryTimers = new Set()
@@ -1638,9 +1758,27 @@ ${pick}
       const items = value.items || []
       const evidence = value.evidence || []
       const open = items.filter((item) => item.type === 'task' && item.status === 'open')
-      const lines = [`页内：项目 ${projects.length} · 条目 ${items.length}（未完成 ${open.length}） · 待核对来源 ${value.total ?? evidence.length} 条（本页 ${evidence.length}）`]
+      // 模型只能看到这段文本：没有日期它就分不清今天和下周，早间提醒会误报「今天没有日程」。
+      const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+      const weekday = '日一二三四五六'[new Date(`${day}T12:00:00+08:00`).getUTCDay()]
+      const when = (item) => {
+        const at = item.at || {}
+        if (at.date && at.clock) return `${at.date} ${at.clock}`
+        if (at.date) return `${at.date} ${at.slot || ''}`.trim()
+        if (item.due) return `截止 ${item.due}`
+        return ''
+      }
+      const timed = open.filter((item) => when(item))
+      const untimed = open.filter((item) => !when(item))
+      const lines = [`今天 ${day}（周${weekday}）· 项目 ${projects.length} · 条目 ${items.length}（未完成 ${open.length}） · 待核对来源 ${value.total ?? evidence.length} 条（本页 ${evidence.length}）`]
       if (projects.length) lines.push('项目：' + projects.slice(0, 10).map((p) => `${p.id}·${p.name}`).join('、'))
-      if (open.length) lines.push('未完成：' + open.slice(0, 10).map((i) => `${i.id}·${i.text}`).join('、'))
+      if (timed.length) {
+        lines.push(`有时间的未完成 ${timed.length} 条：`)
+        for (const item of timed.slice(0, 12)) {
+          lines.push(`  ${item.id} · ${item.text} · ${when(item)}${item.place ? ` · ${item.place}` : ''}`)
+        }
+      }
+      if (untimed.length) lines.push(`无时间的未完成 ${untimed.length} 条：` + untimed.slice(0, 10).map((i) => `${i.id}·${i.text}`).join('、'))
       for (const row of evidence.slice(0, 10)) {
         lines.push(`来源 ${row.id} · ${row.kind || ''} · ${row.title || row.locator || ''} · version ${row.version ?? ''} · ${row.status || ''}`)
         const excerpt = (row.excerpt || '').replace(/\s+/g, ' ').trim()
