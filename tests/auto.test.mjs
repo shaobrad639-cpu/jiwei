@@ -400,3 +400,35 @@ test('redelivery of one message sends the reply only once', async t => {
   await receive('你好，在吗？', 'dup')
   assert.equal(sent.length, 1, '已送达的消息重投不再回')
 })
+
+// 「这条已存在」这类答复不经过 route()，以前没落「已送达」，微信重投就会再回一遍。
+test('an answer-only receipt is also sent once on redelivery', async t => {
+  const f = fixture(t)
+  let bot
+  const sent = []
+  const originalLoad = WeChatBot.prototype.load
+  const originalSend = WeChatBot.prototype.sendText
+  WeChatBot.prototype.load = async function () { bot = this; this.credential = { ilink_user_id: 'owner' } }
+  WeChatBot.prototype.sendText = async function (text) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    sent.push(text)
+  }
+  t.after(() => { WeChatBot.prototype.load = originalLoad; WeChatBot.prototype.sendText = originalSend })
+  const cleanup = []
+  const ctx = {
+    llm: f.runtime, agentDefaultModel: { currentSelection: () => model }, agents: { currentInitiator: () => undefined },
+    tools: { register() { return () => {} } }, webServer: { register() { return () => {} } },
+    inject(_names, fn) { fn(this) }, on() {},
+    effect(fn) { const dispose = fn(); if (typeof dispose === 'function') cleanup.push(dispose) },
+  }
+  t.after(() => cleanup.reverse().forEach(fn => fn()))
+  apply(ctx, { dataDir: join(f.dir, 'inbox'), journalDir: f.dir, python })
+  // 先记一条，再原样说一遍：命中判重，只回「已存在」，不进模型。
+  f.journal(['triage', '--text', '明天交周报'])
+  const receive = (text, id) => bot.handleMessage({ from_user_id: 'owner', message_id: id,
+    item_list: [{ type: 1, text_item: { text } }] })
+  await receive('明天交周报', 'dup-answer')
+  await receive('明天交周报', 'dup-answer')
+  assert.equal(sent.length, 1, '同一条消息重投只回一次')
+  assert.match(sent[0], /已存在/)
+})

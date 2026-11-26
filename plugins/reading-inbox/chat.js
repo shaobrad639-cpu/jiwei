@@ -170,11 +170,19 @@ export class JournalChat {
     })
   }
 
-  acknowledge(key, requestId) {
+  acknowledge(key, requestId, entry) {
     return this.serial(key, async () => {
       const state = await this.load(key)
       const turn = state.turns.find(t => t.id === requestId)
       if (turn) turn.delivered = true
+      // 没经过 route()（比如「这条已存在」的答复）就没有 turn，补一条已送达的，
+      // 否则微信把同一条消息再投一次时，判重找不到它，会再回一遍。
+      else if (entry) {
+        state.turns = [...state.turns, {
+          id: requestId, text: entry.text, reply: entry.reply,
+          at: new Date().toISOString(), delivered: true,
+        }].slice(-20)
+      }
       if (state.pending?.question_turn_id === requestId) state.pending.delivered = true
       await this.save(key, state)
     })

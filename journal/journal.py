@@ -842,12 +842,19 @@ def find_semantic_duplicate(data: dict, raw: str, at: dt.datetime | None = None)
     if not variants:
         return None
     moment = at or now()
+    incoming_day = (parse_at(raw) or {}).get('date')
     for item in data.get('items', []):
         if item.get('status') not in LIVE_STATUSES:
             continue
         created = stamp_dt(item.get('created'))
         if created is None or moment - created > SEMANTIC_WINDOW:
             continue
+        # 说的是另一天的事就不算重投：「今天下午 1:30 电话会议」和昨天那条
+        # 15:30 是两场会，不能被当成「已存在」挡掉。
+        if incoming_day:
+            item_day = (item.get('at') or {}).get('date')
+            if item_day and item_day != incoming_day:
+                continue
         for field in (item.get('text', ''), item.get('quote', '')):
             others = [key for key in (_normalize_text(field), _content_key(field)) if key]
             for left in variants:

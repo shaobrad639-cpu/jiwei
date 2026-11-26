@@ -93,6 +93,16 @@ test('the same wording on a later day is a new entry, not a duplicate', (t) => {
   assert.equal(state().items.length, 2)
 })
 
+test('the same wording for another day is a new arrangement, not a duplicate', (t) => {
+  const { journal, state } = fixture(t)
+  const first = triage(journal, '今天下午 3:30 电话会议')
+  assert.equal(first.duplicate, undefined)
+  // 昨天 15:30 那场会还在账上；今天说「明天下午 1:30」是新的一场，不能被判重挡掉。
+  const next = triage(journal, '明天下午 1:30 电话会议')
+  assert.equal(next.duplicate, undefined, '换了一天就是另一场会')
+  assert.equal(state().items.length, 2)
+})
+
 test('a completed entry does not block a paraphrase', (t) => {
   const { journal, state } = fixture(t)
   const created = triage(journal, '明天交周报')

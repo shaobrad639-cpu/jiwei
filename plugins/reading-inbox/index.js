@@ -417,6 +417,8 @@ export function apply(ctx, config = {}) {
           event.journal_route = 'answer'
           await bot.saveEvents()
           await sendReply(answer.receipt, event)
+          // 这条没经过 route()，也要落一个「已送达」，不然微信重投会再回一遍。
+          await chat.acknowledge(key, ev, { text: event.text, reply: answer.receipt })
           return
         }
       }
@@ -456,6 +458,7 @@ export function apply(ctx, config = {}) {
             '--at', event.at || new Date().toISOString(), '--ev', ev])
           recorded = true
           await sendReply(result.receipt || '已保存这条记录。', event)
+          await chat.acknowledge(key, ev, { text: event.text, reply: result.receipt || '已保存这条记录。' })
           return
         } catch (fallbackError) {
           log(`规则保存或回执失败：${modelErrorCode(fallbackError)}`)
@@ -464,8 +467,10 @@ export function apply(ctx, config = {}) {
       const hint = recorded ? '记录已为你保存好了，只是微信回执确认稍有延迟，可在账本中查看。'
         : writeStarted || fallbackAllowed ? '刚才的记录正在保存中，原话已完整留存，稍后可在账本中核对。'
           : chatErrorMessage(error)
-      try { await sendReply(hint, event) }
-      catch (sendError) { log(`对话失败提示未送达：${sendError.code || sendError.name || 'unknown'}`) }
+      try {
+        await sendReply(hint, event)
+        await chat.acknowledge(key, ev, { text: event.text, reply: hint })
+      } catch (sendError) { log(`对话失败提示未送达：${sendError.code || sendError.name || 'unknown'}`) }
     }
   }
 
