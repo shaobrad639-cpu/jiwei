@@ -1030,11 +1030,15 @@ export function apply(ctx, config = {}) {
         return { item: compactItem(existing), duplicate: true, updated, restored }
       }
       const providedTitle = pickString(input.title, 400)
+      // 转发桥和外部工具常把「(微信文章)」这种占位名当标题传进来。当真标题
+      // 存下就会把 titleResolved 置真，之后真标题再也覆盖不上，Obsidian 笔记
+      // 也叫这个名字。占位名一律当作没给。
+      const usableTitle = providedTitle && !isPlaceholderTitle(providedTitle) ? providedTitle : ''
       const item = {
         id: `it_${randomUUID().slice(0, 8)}`,
         url,
-        title: providedTitle || labelFor(url),
-        titleResolved: Boolean(providedTitle),
+        title: usableTitle || labelFor(url),
+        titleResolved: Boolean(usableTitle),
         site: siteOf(url),
         note: pickString(input.note),
         tags: [],

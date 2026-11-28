@@ -271,9 +271,16 @@ test('WeChat sending checks business errors and echoes the bound conversation to
   assert.equal(request.msg.context_token, 'owner-context')
   assert.equal(JSON.stringify(bot.events).includes('owner-context'), false)
   response = { ret: -14, errmsg: 'private-service-response' }
-  await assert.rejects(bot.sendText('确认问题'), { code: 'WECHAT_SEND_FAILED', message: '微信未接受这条消息' })
+  await assert.rejects(bot.sendText('确认问题'), {
+    code: 'WECHAT_SEND_FAILED',
+    message: '微信未接受这条消息（-14 private-service-response）',
+  })
+  // 会话过期后必须把失效凭据丢掉，否则下一次发送继续失败、面板还显示已连接。
+  assert.equal(bot.status, 'error')
+  assert.equal(bot.credential, null)
+  bot.credential = { ilink_user_id: 'owner', bot_token: 'fake-test-token' }
   response = { ret: 0, errcode: 123 }
-  await assert.rejects(bot.sendText('确认问题'), { code: 'WECHAT_SEND_FAILED' })
+  await assert.rejects(bot.sendText('确认问题'), { code: 'WECHAT_SEND_FAILED', message: /123/ })
   response = {}
   await bot.sendText('兼容不带 ret 的旧响应')
 })

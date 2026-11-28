@@ -73,6 +73,27 @@ function isTimeout(error) {
   return error && (error.name === 'TimeoutError' || error.name === 'AbortError')
 }
 
+/**
+ * 腾讯接口的状态码：成功时是 ret，失败时常常只给 errcode。
+ * 返回 0 表示正常，其余交给调用方判断（-14 = 会话过期）。
+ */
+function resultCode(data) {
+  // ret 和 errcode 可能同时出现，其中一个是 0 不代表成功：取第一个非零值。
+  for (const key of ['ret', 'errcode']) {
+    const value = data && data[key]
+    if (value === undefined || value === null || value === '') continue
+    const code = Number(value)
+    if (Number.isFinite(code) && code !== 0) return code
+  }
+  return 0
+}
+
+function failureDetail(data) {
+  const code = resultCode(data)
+  const text = String((data && (data.errmsg || data.retmsg)) || '').trim()
+  return `${code}${text ? ` ${text}` : ''}`
+}
+
 export function extractUrls(text) {
   if (typeof text !== 'string') return []
   const found = text.match(URL_RE) || []
@@ -361,12 +382,12 @@ export class WeChatBot {
       // 不能再分发消息：否则旧实例和新实例会各回一遍，一条消息两个回执。
       if (signal.aborted) return
       if (data.get_updates_buf) buf = data.get_updates_buf
-      const ret = data.ret
-      if (ret && ret !== 0) {
-        if (ret === -14) {
-          this.status = 'error'
-          this.error = '微信登录已失效，请重新扫码接入。'
-          await this.clearCredential()
+      // 腾讯这套接口失败时给的是 errcode，成功路径上才是 ret。只看 ret 会让
+      // 「session timeout」被当成正常空轮询：状态一直显示已连接，消息再也收不到。
+      const code = resultCode(data)
+      if (code) {
+        if (code === -14) {
+          await this.expire('微信登录已失效，请重新扫码接入。')
           return
         }
         await new Promise((resolve) => setTimeout(resolve, 3000))
@@ -461,8 +482,12 @@ export class WeChatBot {
       },
       { token: this.credential.bot_token, timeoutMs: 30000 },
     )
-    if ((result.ret !== undefined && result.ret !== 0) || (result.errcode !== undefined && result.errcode !== 0)) {
-      throw Object.assign(new Error('微信未接受这条消息'), { code: 'WECHAT_SEND_FAILED' })
+    if (resultCode(result)) {
+      // 会话过期时留着旧 token 只会让下一次继续失败，顺手清掉并说清楚原因。
+      if (resultCode(result) === -14) {
+        await this.expire('微信登录已失效，请重新扫码接入。')
+      }
+      throw Object.assign(new Error(`微信未接受这条消息（${failureDetail(result)}）`), { code: 'WECHAT_SEND_FAILED' })
     }
     // 发送审计：排查重复回执时，能看到每一次实际发出的消息。
     void appendFile(join(this.dir, 'send.log'), `${new Date().toISOString()}\t${String(text).slice(0, 60).replace(/\n/gu, ' ')}\n`, 'utf8')
@@ -534,10 +559,25 @@ export class WeChatBot {
       },
       base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'DSH' },
     }, { token: this.credential.bot_token, timeoutMs: 60000 })
-    if ((result.ret !== undefined && result.ret !== 0) || (result.errcode !== undefined && result.errcode !== 0)) {
-      throw Object.assign(new Error('微信未接受这条文件消息'), { code: 'WECHAT_SEND_FAILED' })
+    if (resultCode(result)) {
+      if (resultCode(result) === -14) {
+        await this.expire('微信登录已失效，请重新扫码接入。')
+      }
+      throw Object.assign(new Error(`微信未接受这条文件消息（${failureDetail(result)}）`), { code: 'WECHAT_SEND_FAILED' })
     }
     return { bytes: rawsize, fileName: item.file_item ? item.file_item.file_name : '图片', asImage }
+  }
+
+  /**
+   * 会话过期：状态标成错误、丢掉失效凭据，面板上才会重新给出扫码入口。
+   * 光把 status 改成 error 不够——旧的 bot_token 留着会让下一次发送继续失败。
+   */
+  async expire(message) {
+    this.status = 'error'
+    this.error = message
+    this.listenAbort = null
+    await this.clearCredential()
+    this.log(message)
   }
 
   async clearCredential() {

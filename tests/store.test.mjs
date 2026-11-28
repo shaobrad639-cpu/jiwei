@@ -49,3 +49,10 @@ test('a stale instance does not revert a title another instance fixed', async (t
   assert.equal(item.title, '真实标题', '标题不能被旧快照写回占位名')
   assert.equal(item.note, '备注')
 })
+
+// 转发桥常把「(微信文章)」当标题传进来；当真标题存下就再也改不回来了。
+test('a placeholder title from the bridge is not treated as a real one', async () => {
+  const { isPlaceholderTitle } = await import('../plugins/reading-inbox/util.js')
+  assert.equal(isPlaceholderTitle('(微信文章)'), true)
+  assert.equal(isPlaceholderTitle('Rubin 快接头用量暴涨 30%'), false)
+})
