@@ -32,7 +32,7 @@ import {
 import {
   STATUSES, STATUS_LABELS, WECHAT_STATUS_LABELS, readingReceipt, WEEK_MS,
   normalizeUrl, dedupeKey, siteOf, textBlock, pickString, localDay,
-  pickStatus, looksGeneric, needsTitle, labelFor,
+  pickStatus, looksGeneric, needsTitle, labelFor, isPlaceholderTitle,
   parseWhen, guessTitle, extractPlace, cleanTitle,
   decodeEntities, countsOf, compactItem, sortItems,
 } from './util.js'
@@ -96,6 +96,12 @@ async function claimIncomingOnDisk(dataDir, key) {
 
 async function releaseIncomingOnDisk(dataDir, key) {
   await unlink(claimFile(dataDir, key)).catch(() => {})
+}
+
+/** 占位标题（外部转发工具写的「(微信文章)」）也允许被真实标题替换。 */
+function titleReplaceable(item) {
+  if (!item) return false
+  return needsTitle(item) || isPlaceholderTitle(item.title)
 }
 
 export function apply(ctx, config = {}) {
@@ -1093,16 +1099,21 @@ export function apply(ctx, config = {}) {
       if ((options.retries || 0) > 0) scheduleRetry(id, url, options.retries)
       return ''
     }
-    await store.mutate((data) => {
+    const retitled = await store.mutate((data) => {
       const item = data.items.find((entry) => entry.id === id)
-      if (!item) return
-      if (title && needsTitle(item)) {
+      if (!item) return false
+      let renamed = false
+      if (title && titleReplaceable(item)) {
         item.title = title
         item.titleResolved = true
+        renamed = true
       }
       if (!item.summary && meta.description) item.summary = meta.description
       item.updatedAt = new Date().toISOString()
+      // 已经有正文的条目，改名后 Obsidian 笔记还叫占位名；补一次导出让文件名跟上。
+      return renamed && Boolean(item.body)
     })
+    if (retitled) void syncObsidian(id)
     return title
   }
 
@@ -1115,7 +1126,8 @@ export function apply(ctx, config = {}) {
     // Obsidian note wants, so those are backfilled on a later pass.
     const wanted = await store.read((data) => {
       const item = data.items.find((entry) => entry.id === id)
-      return Boolean(item && item.status !== 'dropped' && (!item.body || !item.author))
+      return Boolean(item && item.status !== 'dropped'
+        && (!item.body || !item.author || titleReplaceable(item)))
     })
     if (!wanted) return false
     const article = await pythonArticle(url, pythonOverride)
@@ -1135,11 +1147,14 @@ export function apply(ctx, config = {}) {
         item.bodyChars = article.chars
         item.bodyAt = new Date().toISOString()
         delete item.bodyError
-        if (article.title && needsTitle(item)) {
-          item.title = article.title
-          item.titleResolved = true
-        }
         if (!item.summary && article.description) item.summary = article.description.slice(0, 500)
+        changed = true
+      }
+      // 标题单独判定：外部转发工具会带着「(微信文章)」这种占位标题把条目建好，
+      // 那种标题也要被真实标题替换，不然 Obsidian 笔记就叫占位名。
+      if (article.title && titleReplaceable(item)) {
+        item.title = article.title
+        item.titleResolved = true
         changed = true
       }
       if (article.author && item.author !== article.author) {
@@ -1587,7 +1602,8 @@ ${pick}
       const all = Boolean(args && args.all)
       const targets = await store.read((data) =>
         data.items
-          .filter((item) => (id ? item.id === id : all ? true : needsTitle(item) || !item.summary))
+          .filter((item) => (id ? item.id === id : all ? true
+            : needsTitle(item) || !item.summary || isPlaceholderTitle(item.title)))
           .slice(0, 30)
           .map((item) => [item.id, item.url]),
       )

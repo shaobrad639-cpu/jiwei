@@ -80,6 +80,15 @@ export function pickStatus(value) {
 const GENERIC_TITLE =
   /^(小红书|微信公众平台|知乎|微博|哔哩哔哩|bilibili|抖音|首页|登录|环境异常|完成验证|微信文章|小红书笔记|网页|知乎回答)(\s|$|[-–—·|])/iu
 
+/** 括号包起来的站名也是占位标题：「(微信文章)」「【网页】」。 */
+const BRACKETED_TITLE = /^[（(\[【《]\s*(小红书|微信公众平台|微信文章|小红书笔记|知乎回答|网页|未命名链接)\s*[）)\]】》]$/u
+
+/** A title that is only a site label, never the article's own headline. */
+export function isPlaceholderTitle(title) {
+  const text = String(title || '').trim()
+  return Boolean(text) && (GENERIC_TITLE.test(text) || BRACKETED_TITLE.test(text))
+}
+
 /** Site shells, login walls, captcha pages and raw URLs carry no title. */
 export function looksGeneric(title) {
   if (!title) return true
@@ -87,6 +96,7 @@ export function looksGeneric(title) {
   if (/^https?:\/\//iu.test(text)) return true
   if (text.length < 4) return true
   if (GENERIC_TITLE.test(text)) return true
+  if (BRACKETED_TITLE.test(text)) return true
   if (/环境异常|完成验证|访问过于频繁|安全验证/iu.test(text)) return true
   return /^小红书\s*[-–—]/u.test(text)
 }

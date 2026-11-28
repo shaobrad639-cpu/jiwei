@@ -151,6 +151,19 @@ def _is_fake_ip(addr) -> bool:
     inside it and route the connection themselves, so a public name resolving
     there is a normal internet target, not the LAN.
     """
+    # Handle IPv6 mapped IPv4 addresses (standard format ::ffff:198.18.0.114)
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    # getaddrinfo also answers mapped forms like ::ffff:0:c612:72, where the
+    # marker sits at bytes 8-9 and the IPv4 address is the last four bytes.
+    elif addr.version == 6:
+        try:
+            packed = addr.packed
+            if len(packed) != 16 or b"\xff\xff" not in packed[:12]:
+                return False
+            addr = ipaddress.IPv4Address(packed[-4:])
+        except Exception:
+            return False
     if addr.version != 4:
         return False
     return ipaddress.ip_address("198.18.0.0") <= addr <= ipaddress.ip_address("198.19.255.255")

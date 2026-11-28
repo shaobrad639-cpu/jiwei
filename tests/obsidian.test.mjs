@@ -126,11 +126,16 @@ test('fetcher treats the RFC 2544 fake-IP range as public, not LAN', (t) => {
     'print(f._is_fake_ip(ipaddress.ip_address("198.20.0.1")))',
     'print(f._is_fake_ip(ipaddress.ip_address("10.0.0.1")))',
     'print(f._is_lan(ipaddress.ip_address("198.18.0.85")))',
+    // getaddrinfo 走代理时会回这种映射形式；按 IPv4 判，否则整段被当成内网拒绝。
+    'print(f._is_fake_ip(ipaddress.ip_address("::ffff:0:c612:72")))',
+    'print(f._is_fake_ip(ipaddress.ip_address("::ffff:198.18.0.114")))',
+    'print(f._is_fake_ip(ipaddress.ip_address("::ffff:10.0.0.1")))',
+    'print(f._is_fake_ip(ipaddress.ip_address("2408:8207:1234::1")))',
   ].join('\n'))
   const result = spawnSync(python, [script], { encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)
   const lines = result.stdout.trim().split(/\r?\n/)
-  assert.deepEqual(lines, ['True', 'True', 'False', 'False', 'True'])
+  assert.deepEqual(lines, ['True', 'True', 'False', 'False', 'True', 'True', 'True', 'False', 'False'])
 })
 
 test('fetcher still refuses literal private and loopback hosts', () => {

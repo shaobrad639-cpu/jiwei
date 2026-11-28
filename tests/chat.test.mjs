@@ -8,7 +8,7 @@ import { JournalChat, chatCommand, chatSnapshot } from '../plugins/reading-inbox
 import { JournalLlm } from '../plugins/reading-inbox/llm.js'
 import { WeChatBot } from '../plugins/reading-inbox/wechat.js'
 import { apply } from '../plugins/reading-inbox/index.js'
-import { shanghaiNow, shanghaiDay } from '../plugins/reading-inbox/util.js'
+import { shanghaiNow, shanghaiDay, isPlaceholderTitle, looksGeneric } from '../plugins/reading-inbox/util.js'
 
 import { python } from './python.mjs'
 function fixture(t) {
@@ -407,4 +407,18 @@ test('a stopped bot ignores messages that were already fetched', async t => {
     item_list: [{ type: 1, text_item: { text: '今天日程' } }] })
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.deepEqual(received, [], '已经停掉的实例不能再处理旧批次里的消息')
+})
+
+// 外部转发工具会带着「(微信文章)」这种占位标题把条目建好；认不出来就会一直
+// 沿用占位名，Obsidian 笔记也跟着叫这个名字。
+test('bracketed site labels count as placeholder titles', () => {
+  for (const title of ['(微信文章)', '（微信文章）', '【网页】', '(小红书笔记)', '  (微信文章)  ']) {
+    assert.equal(isPlaceholderTitle(title), true, `应视为占位：${title}`)
+    assert.equal(looksGeneric(title), true, `应视为无标题：${title}`)
+  }
+  for (const title of ['Rubin 快接头用量暴涨 30%', '微信文章推荐：一篇好文', '通知测试（可删）']) {
+    assert.equal(isPlaceholderTitle(title), false, `不应视为占位：${title}`)
+  }
+  assert.equal(isPlaceholderTitle(''), false)
+  assert.equal(isPlaceholderTitle(undefined), false)
 })
